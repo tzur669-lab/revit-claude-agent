@@ -1,0 +1,38 @@
+revit-claude-agent
+==================
+
+This repository is licensed under the MIT License (see LICENSE), with the
+exception of bundled third-party components listed below, which retain their
+own licenses.
+
+--------------------------------------------------------------------------------
+mcp-server/  —  Revit MCP Server
+--------------------------------------------------------------------------------
+
+The contents of the `mcp-server/` directory are a fork of:
+
+    revit-mcp-server
+    https://github.com/Demolinator/revit-mcp-server
+    (itself based on https://github.com/mcp-servers-for-revit/mcp-server-for-revit-python)
+
+Licensed under the MIT License.
+
+    Copyright (c) 2025 Juan Rodriguez
+
+The full license text is preserved at `mcp-server/LICENSE`.
+
+Local modifications made in this repository are documented in
+`mcp-server/PATCH-NOTES.md`. In summary:
+
+  - main.py                 pyRevit Routes port auto-discovery
+  - revit_mcp/parameters.py preserve Unicode (Hebrew) text instead of
+                            replacing non-ASCII with '?'
+  - revit_mcp/utils.py      same Unicode-preservation fix for string helpers
+
+--------------------------------------------------------------------------------
+pyrevit-extension/BIMAgents.extension/  —  Claude QTO Extract
+--------------------------------------------------------------------------------
+
+Original work, part of this repository, MIT-licensed as above.
+Built for pyRevit (https://github.com/pyrevitlabs/pyRevit), which is licensed
+under the GNU GPL v3 and is a runtime dependency, not bundled here.

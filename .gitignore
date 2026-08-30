@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+wheels/
+.venv/
+venv/
+.python-version
+
+# uv
+# (uv.lock IS committed under mcp-server/ — it is part of the pinned fork)
+
+# Tracking data — runtime output, never committed. Real project names /
+# snapshots live here. Keep your TRACKING_DATA_DIR outside the repo; this is
+# only a guard in case it isn't.
+/revit-tracking/
+**/revit-tracking/
+last_run.json
+last_run.json.bak
+*.known-good-*
+hebrew_debug*.log
+.marks/
+
+# Claude Code local state (if you develop the skill in-place under a .claude dir)
+.claude/settings.local.json
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs / scratch
+*.log
+*TODO.md

@@ -1,0 +1,23 @@
+// Copy to config.jsonc and edit. Nothing reads this file automatically — it is
+// the single place that documents the two installation-specific values. The
+// installer (scripts/install.ps1) can take them as parameters and substitute
+// them into the installed skill/agent copies for you.
+{
+  // Absolute path to a directory you can browse, where the tracker writes all
+  // per-project data (snapshots, deltas, journal, state). Keep it OUTSIDE this
+  // repo. This is the value passed as `args["base"]` to tracker.py, and the
+  // "Base" the revit-historian agent reads.
+  //
+  // Windows example:
+  "tracking_data_dir": "C:\\Users\\YOU\\revit-tracking",
+
+  // Where tracker.py + last_run.json get installed. Default is fine for almost
+  // everyone; change only if you keep Claude Code's home dir somewhere unusual.
+  // tracker.py also honors the REVIT_TRACKER_DIR environment variable.
+  "tracker_dir": "~/.claude/revit-tracker",
+
+  // The pyRevit Routes port. Leave null to let the MCP server auto-discover it
+  // (reads pyRevit's serverinfo files, falls back to 48884). Set a number to
+  // force it. Also settable via the REVIT_PORT environment variable.
+  "revit_port": null
+}
