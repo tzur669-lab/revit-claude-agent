@@ -2,6 +2,30 @@
 """Utility functions for MCP tools"""
 
 
+def _verification_suffix(response):
+    """Level-1/level-2 verification evidence (tx_status / verified), if a
+    handler provided it, formatted as a short suffix for a message response.
+
+    Additive only: a handler that supplies neither field is completely
+    unaffected. Exists because the "message" branch below otherwise returns
+    only response["message"] and silently drops every other key - which
+    made a handler's own verification detail invisible to the caller even
+    though the underlying HTTP response carried it correctly."""
+    parts = []
+    if "tx_status" in response:
+        parts.append("tx_status: {}".format(response["tx_status"]))
+    v = response.get("verified")
+    if isinstance(v, dict):
+        parts.append("verified.ok: {}".format(v.get("ok")))
+        if v.get("reason"):
+            parts.append("reason: {}".format(v["reason"]))
+        if v.get("failures"):
+            parts.append("failures: {}".format(len(v["failures"])))
+    if not parts:
+        return ""
+    return "\n[" + " | ".join(parts) + "]"
+
+
 def format_response(response):
     """Helper function to format API responses consistently for MCP tools.
 
@@ -29,7 +53,7 @@ def format_response(response):
             if "output" in response:  # Code execution responses
                 return response["output"]
             elif "message" in response:
-                return response["message"]
+                return response["message"] + _verification_suffix(response)
             elif "result" in response:
                 return str(response["result"])
             elif "data" in response:

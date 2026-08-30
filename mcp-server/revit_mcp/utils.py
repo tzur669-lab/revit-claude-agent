@@ -46,6 +46,133 @@ def suppress_warnings(transaction):
         pass
 
 
+# All seven DB.TransactionStatus members, derived live from this Revit
+# session via System.Enum.GetNames(DB.TransactionStatus) - not guessed. Only
+# Committed means the database actually accepted the change:
+#   Uninitialized, Started  - Commit() did not take effect
+#   RolledBack               - the _FailureSwallower above returns
+#                               ProceedWithRollBack on any error-severity
+#                               failure, and Commit() then returns RolledBack
+#                               WITHOUT raising - this is the exact mechanism
+#                               behind "MoveElement returned success and
+#                               moved nothing"
+#   Pending                  - still open; never report a pending write as done
+#   Error, Proceed           - not documented as steady-state Commit() results;
+#                               treated as failures rather than assumed safe
+# Fail closed: any status this set does not name - including one a future
+# Revit version might add - is treated as failure, never as success.
+_TX_OK_STATUSES = frozenset([DB.TransactionStatus.Committed])
+
+
+def commit_verified(t):
+    """Commit a transaction and report what Revit actually did.
+
+    Low-level verification only: this function does NOT construct MCP
+    responses and does NOT decide handler policy. It returns
+    (tx_ok, tx_status) - a bool (or None) and the exact TransactionStatus
+    name as a string - and nothing else. Each caller maps that outcome into
+    its own existing response contract; keeping this module ignorant of the
+    response shape is deliberate, since every route imports it.
+
+    tx_ok is True only when Commit() returns Committed. Every other status
+    maps to False (see _TX_OK_STATUSES above for why each one does).
+
+    Committed means the database accepted the change. It does NOT mean the
+    operation achieved its intent - that is the caller's own post-condition
+    check to make, separately.
+
+    t may be None - the "#!notx" convention in code_execution.py, where the
+    caller opted out of the wrapping transaction and manages its own. In
+    that case this returns (None, "self_managed"): not True, not False.
+    self_managed means the transaction outcome was not observable by this
+    helper, never that it succeeded - a caller must not treat it as a pass.
+    """
+    if t is None:
+        return None, "self_managed"
+    status = t.Commit()
+    return (status in _TX_OK_STATUSES), str(status)
+
+
+# Provisional - see docs/operation-contracts.md. Not a documented Revit
+# constant; a starting tolerance to be refined from measured behaviour.
+PARAM_DOUBLE_TOLERANCE = 1e-6
+
+
+def param_read_matches(param, storage_type, intended):
+    """Re-read a parameter's CURRENT value and compare it to the typed value
+    that was requested - not a raw string comparison, since requesting "5"
+    for a Double parameter that correctly reads back 5.0 must not read as a
+    mismatch. Used as the level-2 post-condition for set_parameter and
+    modify_element: Set() not raising is not proof the value actually holds
+    once Revit's regeneration finishes running. Returns (matches, actual_str).
+
+    Shared by parameters.py and editing.py rather than duplicated - both
+    handlers set parameters by the same four storage types and need the
+    same comparison semantics."""
+    try:
+        if storage_type == DB.StorageType.String:
+            actual = param.AsString() or ""
+            return actual == str(intended), actual
+        elif storage_type == DB.StorageType.Integer:
+            actual = param.AsInteger()
+            return actual == int(intended), str(actual)
+        elif storage_type == DB.StorageType.Double:
+            actual = param.AsDouble()
+            return abs(actual - float(intended)) <= PARAM_DOUBLE_TOLERANCE, str(round(actual, 6))
+        elif storage_type == DB.StorageType.ElementId:
+            actual = get_element_id_value(param.AsElementId())
+            return actual == get_element_id_value(make_element_id(intended)), str(actual)
+    except Exception as e:
+        return False, "read failed: {}".format(str(e))
+    return False, "unsupported storage type"
+
+
+def verify_created_elements(doc, id_category_pairs):
+    """Level-2 post-condition for create_* operations: each created element
+    id must resolve, and (when an expected BuiltInCategory is given for that
+    item - pass None to skip) its actual category must match.
+
+    id_category_pairs is a list of (element_id_int, expected_builtin_category
+    or None). Handles batches that mix categories in one call (e.g.
+    create_line_based creates both walls and beams) by checking each item
+    against its own expected category rather than one category for the
+    whole batch. Returns a verified dict in the standard shape.
+
+    Shared by building.py and rooms.py rather than duplicated per handler."""
+    checked = 0
+    failures = []
+    for eid, expected_cat in id_category_pairs:
+        checked += 1
+        elem = doc.GetElement(DB.ElementId(eid))
+        if elem is None:
+            failures.append({"id": eid, "reason": "does not resolve after commit"})
+            continue
+        if expected_cat is not None:
+            try:
+                actual_cat = elem.Category.Id.IntegerValue if elem.Category else None
+            except Exception:
+                actual_cat = None
+            if actual_cat != int(expected_cat):
+                failures.append({
+                    "id": eid,
+                    "reason": "category mismatch",
+                    "expected_category": int(expected_cat),
+                    "actual_category": actual_cat,
+                })
+    verified = {
+        "ok": (len(failures) == 0) if checked else None,
+        "method": "element_category",
+        "expected": {"count": checked},
+        "actual": {"count_ok": checked - len(failures)},
+    }
+    if not checked:
+        verified["status"] = "not_checked"
+        verified["reason"] = "Nothing was created"
+    if failures:
+        verified["failures"] = failures[:50]
+    return verified
+
+
 def _to_text(value):
     """Convert a value to text without corrupting non-ASCII characters.
     IronPython 2.7 compatible: tries unicode first (its native string type
