@@ -1584,7 +1584,7 @@ def arm_handler(ident):
     h = _make_handler(st.gen)
     try:
         app.DocumentChanged += h
-    except Exception, e:
+    except Exception as e:
         st.handler = None
         st.hooked = False
         return {"armed": False, "reason": str(e)}
@@ -1835,7 +1835,7 @@ def op_smoke(args):
     try:
         DB.Document.GetDocumentVersion(doc)
         c["get_document_version"] = True
-    except Exception, e:
+    except Exception as e:
         c["get_document_version"] = "FAIL: %s" % e
         res["ok"] = False
 
@@ -1855,7 +1855,7 @@ def op_smoke(args):
             System.IO.File.Delete(tp + ".bak")
         except Exception:
             pass
-    except Exception, e:
+    except Exception as e:
         c["hebrew_roundtrip"] = "FAIL: %s" % e
         res["ok"] = False
 
@@ -1866,7 +1866,7 @@ def op_smoke(args):
         res["ok"] = False
     except TrackerAbort:
         c["tsv_guard"] = True
-    except Exception, e:
+    except Exception as e:
         c["tsv_guard"] = "FAIL: %s" % e
         res["ok"] = False
 
@@ -1876,7 +1876,7 @@ def op_smoke(args):
         c["element_count_all"] = len(collect_elements(snap_ctx("all")))
         c["volatile_resolved"] = len(ctx_model["volatile"])
         c["tier1_resolved"] = len(ctx_model["tier1"])
-    except Exception, e:
+    except Exception as e:
         c["collect"] = "FAIL: %s" % e
         res["ok"] = False
 
@@ -1895,7 +1895,7 @@ def op_smoke(args):
         c["sweep_count"] = n_sweep
         c["sweep_ms_per_1k"] = (round(sweep_ms * 1000.0 / n_sweep, 2)
                                  if n_sweep else None)
-    except Exception, e:
+    except Exception as e:
         c["sweep"] = "FAIL: %s" % e
         res["ok"] = False
 
@@ -1954,7 +1954,7 @@ def acquire_lock(idir, run):
     try:
         fs = System.IO.FileStream(path, System.IO.FileMode.CreateNew,
                                   System.IO.FileAccess.Write,
-                                  System.IO.FileShare.None)
+                                  getattr(System.IO.FileShare, "None"))
         fs.Close()
     except Exception:
         return None, load_json(path, None) or {"run": "unknown"}
@@ -2465,11 +2465,11 @@ def op_snapshot(args):
                     else:
                         loc["notes"].append(
                             "INCR_SHADOW_OK_dirty%d" % sstats["dirty"])
-                except IncrementalGiveUp, ge:
+                except IncrementalGiveUp as ge:
                     loc["notes"].append("INCR_SHADOW_GIVEUP_%s" % str(ge))
             else:
                 loc["notes"].append("INCR_SHADOW_SKIP_%s" % why_incr)
-        except Exception, se:
+        except Exception as se:
             loc["notes"].append("INCR_SHADOW_ERROR_%s" % str(se))
 
     result = {
@@ -2633,10 +2633,10 @@ def main(op, args=None):
         result, read_only = fn(args)
         result["run"] = run
         result["ok"] = result.get("ok", True)
-    except TrackerAbort, e:
+    except TrackerAbort as e:
         result = {"op": op, "run": run, "ok": False, "error": str(e), "at": now_iso()}
         read_only = True
-    except Exception, e:
+    except Exception as e:
         result = {
             "op": op, "run": run, "ok": False,
             "error": "%s: %s" % (type(e).__name__, e),
@@ -2659,7 +2659,7 @@ def main(op, args=None):
     try:
         ensure_dir(LIB_DIR)
         write_text_atomic(RESULT_PATH, json.dumps(result, ensure_ascii=True, indent=1, sort_keys=True))
-    except Exception, e:
+    except Exception as e:
         # Nothing on disk means nothing to read. Fail loudly and visibly.
         print(jdump({"ok": False, "run": run, "error": "RESULT_WRITE_FAILED: %s" % e}))
         return
