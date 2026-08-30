@@ -4,7 +4,7 @@ Parameters Module for Revit MCP
 Handles reading element properties and setting parameter values
 """
 
-from utils import get_element_name, get_element_id_value, make_element_id, suppress_warnings
+from utils import get_element_name, get_element_id_value, make_element_id, suppress_warnings, repair_hebrew_in
 from pyrevit import routes, revit, DB
 import json
 import traceback
@@ -200,6 +200,7 @@ def register_parameter_routes(api):
                 )
 
             data = json.loads(request.data) if isinstance(request.data, str) else request.data
+            data = repair_hebrew_in(data)
 
             element_id = data.get("element_id")
             parameter_name = data.get("parameter_name")

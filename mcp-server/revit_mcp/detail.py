@@ -4,7 +4,7 @@ Detail Module for Revit MCP
 Handles detail line creation for view-specific annotation
 """
 
-from utils import get_element_name, get_element_id_value, suppress_warnings
+from utils import get_element_name, get_element_id_value, suppress_warnings, repair_hebrew_in
 from pyrevit import routes, revit, DB
 import json
 import traceback
@@ -28,6 +28,7 @@ def register_detail_routes(api):
                 )
 
             data = json.loads(request.data) if isinstance(request.data, str) else request.data
+            data = repair_hebrew_in(data)
 
             start_point = data.get("start_point")
             end_point = data.get("end_point")

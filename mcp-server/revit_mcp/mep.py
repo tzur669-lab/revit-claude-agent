@@ -4,7 +4,7 @@ MEP Module for Revit MCP
 Handles duct, pipe, and MEP system creation
 """
 
-from utils import get_element_name, get_element_id_value, make_element_id, suppress_warnings
+from utils import get_element_name, get_element_id_value, make_element_id, suppress_warnings, repair_hebrew_in
 from pyrevit import routes, revit, DB
 import json
 import traceback
@@ -28,6 +28,7 @@ def register_mep_routes(api):
                 )
 
             data = json.loads(request.data) if isinstance(request.data, str) else request.data
+            data = repair_hebrew_in(data)
 
             start_point = data.get("start_point")
             end_point = data.get("end_point")
@@ -194,6 +195,7 @@ def register_mep_routes(api):
                 )
 
             data = json.loads(request.data) if isinstance(request.data, str) else request.data
+            data = repair_hebrew_in(data)
 
             start_point = data.get("start_point")
             end_point = data.get("end_point")
@@ -345,6 +347,7 @@ def register_mep_routes(api):
                 )
 
             data = json.loads(request.data) if isinstance(request.data, str) else request.data
+            data = repair_hebrew_in(data)
 
             system_type = data.get("system_type")
             system_name = data.get("system_name")

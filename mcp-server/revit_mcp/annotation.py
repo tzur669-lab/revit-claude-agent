@@ -4,7 +4,7 @@ Annotation Module for Revit MCP
 Handles dimensions and wall tagging
 """
 
-from utils import get_element_name, get_element_id_value, make_element_id, suppress_warnings
+from utils import get_element_name, get_element_id_value, make_element_id, suppress_warnings, repair_hebrew_in
 from pyrevit import routes, revit, DB
 import json
 import traceback
@@ -33,6 +33,7 @@ def register_annotation_routes(api):
                 )
 
             data = json.loads(request.data) if isinstance(request.data, str) else request.data
+            data = repair_hebrew_in(data)
 
             element_ids = data.get("element_ids", [])
             dimension_type = data.get("dimension_type", "linear")
@@ -221,6 +222,7 @@ def register_annotation_routes(api):
             data = {}
             if request and request.data:
                 data = json.loads(request.data) if isinstance(request.data, str) else request.data
+                data = repair_hebrew_in(data)
 
             use_leader = data.get("use_leader", False)
             tag_type_name = data.get("tag_type_name")

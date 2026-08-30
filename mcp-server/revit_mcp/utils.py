@@ -49,11 +49,69 @@ def suppress_warnings(transaction):
 def _to_text(value):
     """Convert a value to text without corrupting non-ASCII characters.
     IronPython 2.7 compatible: tries unicode first (its native string type
-    for .NET strings), falls back to str for Py3 environments."""
+    for .NET strings), falls back to str for Py3 environments.
+
+    IronPython 2.7's unicode(str) does not raise on non-ASCII bytes the way
+    CPython 2.7 does - it silently maps each byte to the codepoint of the
+    same value (a Latin-1 decode), verified directly against this engine.
+    A str carrying UTF-8 bytes - e.g. straight out of urllib.unquote() on a
+    percent-encoded URL path segment, which is how view_name and similar
+    <param> route arguments arrive - comes out as mojibake: one wrong
+    "character" per original UTF-8 byte, no exception raised. Repaired
+    below via the same encode('latin-1')/decode('utf-8') round-trip used
+    for POST-body JSON in hebrew_io_fix.py. Safe no-op on text that was
+    never corrupted: ASCII round-trips unchanged, and genuine Unicode text
+    (real Hebrew sits at codepoints 1488-1514, past latin-1's 0-255 range)
+    fails the encode('latin-1') step and is returned as-is."""
     try:
-        return unicode(value)
+        text = unicode(value)
     except NameError:
         return str(value)
+    return repair_hebrew_text(text)
+
+
+def repair_hebrew_text(text):
+    """Undo a Latin-1-per-byte mojibake decode of UTF-8 text, if present.
+
+    This is the same repair _to_text applies internally, exposed directly
+    for callers that already have a unicode/str value in hand - e.g. a
+    route handler's request.data dict, parsed by pyrevit core's
+    _prepare_request (pyrevit/routes/server/server.py) in a DIFFERENT
+    engine scope than this extension's own code. See handler.py's own
+    comment on base.Response for confirmation this cross-scope split is a
+    real, documented pyRevit architecture detail, not a guess: "this
+    module is executed on a different Engine than the script that
+    registered the request handler function". A monkeypatch on pyRevit
+    core's HttpRequestHandler therefore never reaches route handlers in
+    this extension - verified live, 2026-08-24: the patch showed as
+    installed on pyrevit.routes.server.server.HttpRequestHandler when
+    checked immediately after installing it, yet request.data as received
+    by this extension's own handlers stayed uncorrected. The repair must
+    happen here instead, at the point each handler actually reads its
+    text params - same round-trip as _to_text, safe no-op on text that
+    was never corrupted (see _to_text's docstring for why)."""
+    if not isinstance(text, unicode):
+        return text
+    try:
+        return text.encode("latin-1").decode("utf-8")
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return text
+
+
+def repair_hebrew_in(value):
+    """Recursively apply repair_hebrew_text to every string in a parsed
+    JSON value (dict/list/str), leaving other types untouched. Call this
+    on request.data as the first thing a POST handler does, before
+    reading any individual field, so every text parameter - not just the
+    ones a handler happens to route through normalize_string/
+    sanitize_string - gets fixed the same way."""
+    if isinstance(value, dict):
+        return dict((repair_hebrew_in(k), repair_hebrew_in(v)) for k, v in value.items())
+    if isinstance(value, list):
+        return [repair_hebrew_in(v) for v in value]
+    if isinstance(value, unicode):
+        return repair_hebrew_text(value)
+    return value
 
 
 def normalize_string(text):

@@ -20,7 +20,7 @@ import json
 import logging
 import traceback
 
-from utils import get_element_name, get_element_id_value
+from utils import get_element_name, get_element_id_value, repair_hebrew_in
 
 logger = logging.getLogger(__name__)
 
@@ -146,6 +146,7 @@ def register_clash_routes(api):
             data = {}
             if request and request.data:
                 data = json.loads(request.data) if isinstance(request.data, str) else request.data
+                data = repair_hebrew_in(data)
 
             max_clashes = int(data.get("max_clashes", 200))
             a_names = data.get("set_a_categories") or []

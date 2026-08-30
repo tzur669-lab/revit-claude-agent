@@ -4,7 +4,7 @@ Placement Module for Revit MCP
 Handles family placement and element creation functionality
 """
 
-from utils import get_element_name, find_family_symbol_safely, get_element_id_value, suppress_warnings
+from utils import get_element_name, find_family_symbol_safely, get_element_id_value, suppress_warnings, repair_hebrew_in
 from pyrevit import routes, revit, DB
 import json
 import os
@@ -60,6 +60,7 @@ def register_placement_routes(api):
                     )
             else:
                 data = request.data
+            data = repair_hebrew_in(data)
 
             # Validate data structure
             if not data or not isinstance(data, dict):
@@ -400,6 +401,7 @@ def register_placement_routes(api):
                     data={"error": "No active Revit document"}, status=503
                 )
             data = json.loads(request.data) if isinstance(request.data, str) else request.data
+            data = repair_hebrew_in(data)
             file_path = data.get("file_path")
             if not file_path:
                 return routes.make_response(

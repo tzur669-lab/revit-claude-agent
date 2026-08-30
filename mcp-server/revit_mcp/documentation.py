@@ -4,7 +4,7 @@ Documentation Module for Revit MCP
 Handles sheet creation, schedule creation, and document export
 """
 
-from utils import get_element_name, get_element_id_value, suppress_warnings
+from utils import get_element_name, get_element_id_value, suppress_warnings, repair_hebrew_in
 from pyrevit import routes, revit, DB
 import json
 import traceback
@@ -29,6 +29,7 @@ def register_documentation_routes(api):
             data = {}
             if request and request.data:
                 data = json.loads(request.data) if isinstance(request.data, str) else request.data
+                data = repair_hebrew_in(data)
 
             sheet_number = data.get("sheet_number")
             sheet_name = data.get("sheet_name", "Unnamed Sheet")
@@ -142,6 +143,7 @@ def register_documentation_routes(api):
                 )
 
             data = json.loads(request.data) if isinstance(request.data, str) else request.data
+            data = repair_hebrew_in(data)
 
             category_str = data.get("category")
             fields = data.get("fields")
@@ -284,6 +286,7 @@ def register_documentation_routes(api):
             data = {}
             if request and request.data:
                 data = json.loads(request.data) if isinstance(request.data, str) else request.data
+                data = repair_hebrew_in(data)
 
             view_name = data.get("view_name")
             export_format = data.get("format", "pdf")

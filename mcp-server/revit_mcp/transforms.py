@@ -4,7 +4,7 @@ Transforms Module for Revit MCP
 Handles move, copy, rotate, and mirror operations on elements
 """
 
-from utils import get_element_id_value, make_element_id, suppress_warnings
+from utils import get_element_id_value, make_element_id, suppress_warnings, repair_hebrew_in
 from pyrevit import routes, revit, DB
 from System.Collections.Generic import List
 import json
@@ -30,6 +30,7 @@ def register_transform_routes(api):
                 )
 
             data = json.loads(request.data) if isinstance(request.data, str) else request.data
+            data = repair_hebrew_in(data)
 
             element_ids = data.get("element_ids", [])
             operation = data.get("operation")

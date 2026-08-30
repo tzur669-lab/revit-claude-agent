@@ -4,7 +4,7 @@ View Management Module for Revit MCP
 Handles view creation and active view switching
 """
 
-from utils import get_element_name, get_element_id_value, suppress_warnings
+from utils import get_element_name, get_element_id_value, suppress_warnings, repair_hebrew_in
 from pyrevit import routes, revit, DB
 import json
 import traceback
@@ -28,6 +28,7 @@ def register_view_management_routes(api):
                 )
 
             data = json.loads(request.data) if isinstance(request.data, str) else request.data
+            data = repair_hebrew_in(data)
 
             view_type = data.get("view_type")
             name = data.get("name")
@@ -313,6 +314,7 @@ def register_view_management_routes(api):
                 )
 
             data = json.loads(request.data) if isinstance(request.data, str) else request.data
+            data = repair_hebrew_in(data)
 
             view_name = data.get("view_name")
             if not view_name:

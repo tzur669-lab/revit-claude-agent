@@ -9,6 +9,16 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# Note: Hebrew/non-ASCII text repair for incoming requests is NOT done here.
+# An earlier attempt monkeypatched pyrevit.routes.server.server's request
+# parsing from this file, but pyRevit runs route handler functions in a
+# different engine scope than the module that registers them (see
+# handler.py's own comment on base.Response) - a patch installed from here
+# never reaches the code that actually handles a request. The repair
+# instead lives in revit_mcp/utils.py (repair_hebrew_in / repair_hebrew_text),
+# called explicitly by each handler that reads request.data - see
+# code_execution.py for the reference implementation.
+
 # Initialize the main API
 api = routes.API("revit_mcp")
 

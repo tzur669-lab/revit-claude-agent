@@ -4,7 +4,7 @@ Code Execution Module for Revit MCP
 Handles direct execution of IronPython code in Revit context.
 """
 from pyrevit import routes, revit, DB
-from utils import suppress_warnings
+from utils import suppress_warnings, repair_hebrew_in
 import json
 import logging
 import sys
@@ -36,6 +36,11 @@ def register_code_execution_routes(api):
                 if isinstance(request.data, str)
                 else request.data
             )
+            # Repair Hebrew (and other non-ASCII) text mangled by a
+            # cross-engine-scope quirk in pyrevit core's request parsing -
+            # see repair_hebrew_in's docstring in utils.py. Safe no-op on
+            # text that was never corrupted.
+            data = repair_hebrew_in(data)
             code_to_execute = data.get("code", "")
             description = data.get("description", "Code execution")
 
@@ -46,10 +51,17 @@ def register_code_execution_routes(api):
 
             logger.info("Executing code: {}".format(description))
 
-            # Create a transaction for any model modifications
-            t = DB.Transaction(doc, "MCP Code Execution: {}".format(description))
-            t.Start()
-            suppress_warnings(t)
+            # Code whose first line is "#!notx" runs with no wrapping
+            # transaction and manages its own. Revit's edit scopes
+            # (StairsEditScope, SketchEditScope, TopographyEditScope) refuse
+            # to start while the document is already modifiable.
+            no_tx = code_to_execute.lstrip().startswith("#!notx")
+
+            t = None
+            if not no_tx:
+                t = DB.Transaction(doc, "MCP Code Execution: {}".format(description))
+                t.Start()
+                suppress_warnings(t)
 
             try:
                 # Capture stdout to return any print statements
@@ -87,8 +99,9 @@ def register_code_execution_routes(api):
                 output = captured_output.getvalue()
                 captured_output.close()
 
-                # Commit the transaction
-                t.Commit()
+                # Commit the transaction (absent when the caller opted out)
+                if t is not None:
+                    t.Commit()
 
                 return routes.make_response(
                     data={
@@ -112,7 +125,7 @@ def register_code_execution_routes(api):
                 captured_output.close()
 
                 # Rollback transaction if it's still active
-                if t.HasStarted() and not t.HasEnded():
+                if t is not None and t.HasStarted() and not t.HasEnded():
                     t.RollBack()
 
                 # Get the full traceback

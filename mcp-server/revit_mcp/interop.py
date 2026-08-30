@@ -4,7 +4,7 @@ Interop Module for Revit MCP
 Handles IFC export and external file linking/importing
 """
 
-from utils import get_element_name, get_element_id_value, suppress_warnings
+from utils import get_element_name, get_element_id_value, suppress_warnings, repair_hebrew_in
 from pyrevit import routes, revit, DB
 import clr
 import json
@@ -30,6 +30,7 @@ def register_interop_routes(api):
                 )
 
             data = json.loads(request.data) if isinstance(request.data, str) else request.data
+            data = repair_hebrew_in(data)
 
             file_path = data.get("file_path")
             if not file_path:
@@ -135,6 +136,7 @@ def register_interop_routes(api):
                 )
 
             data = json.loads(request.data) if isinstance(request.data, str) else request.data
+            data = repair_hebrew_in(data)
 
             file_path = data.get("file_path")
             if not file_path:

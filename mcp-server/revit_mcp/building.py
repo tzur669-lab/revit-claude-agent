@@ -5,7 +5,7 @@ Handles creation of line-based elements (walls, beams), surface-based
 elements (floors, roofs, ceilings), and levels.
 """
 
-from utils import get_element_name, get_element_id_value, suppress_warnings
+from utils import get_element_name, get_element_id_value, suppress_warnings, repair_hebrew_in
 from pyrevit import routes, revit, DB
 from System.Collections.Generic import List
 import json
@@ -32,6 +32,7 @@ def register_building_routes(api):
                 )
 
             data = json.loads(request.data) if isinstance(request.data, str) else request.data
+            data = repair_hebrew_in(data)
             elements = data.get("elements", [])
 
             if not elements:
@@ -287,6 +288,7 @@ def register_building_routes(api):
                 )
 
             data = json.loads(request.data) if isinstance(request.data, str) else request.data
+            data = repair_hebrew_in(data)
             elements = data.get("elements", [])
 
             if not elements:
@@ -591,6 +593,7 @@ def register_building_routes(api):
                 )
 
             data = json.loads(request.data) if isinstance(request.data, str) else request.data
+            data = repair_hebrew_in(data)
             levels = data.get("levels", [])
 
             if not levels:
