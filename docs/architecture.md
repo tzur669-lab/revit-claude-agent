@@ -94,12 +94,30 @@ built to answer three questions the raw connection cannot — what happened here
 since last time, who did it, and how do you know an operation that reported
 "success" actually happened.
 
+### Three levels of verification, one designed system
+
+Milestone 1 (2026-08-31) added the two levels this project's own memory had
+been compensating for since the tracker existed, without ever fixing at the
+source. All three now exist deliberately, and none subsumes another — see
+`docs/operation-contracts.md` for the full per-operation matrix:
+
+| Level | Question | Where | Catches |
+|---|---|---|---|
+| **1 · Transaction** | Did Revit commit? | `commit_verified()`, every `revit_mcp/*.py` handler | `Commit()` returning anything but `Committed` — the exact "`MoveElement` returned success and moved nothing" mechanism, now caught at the route layer instead of only inferred later |
+| **2 · Post-condition** | Did *this operation* achieve its own contract? | per-handler, `docs/operation-contracts.md` | Revit committing while silently declining, clamping, or relocating — measured live: a hosted door's host-wall curve change that Committed with zero failure messages and no actual change |
+| **3 · Intent** | Did the *batch* achieve what the user asked? | the tracker's checkpoint diff + the queue item's `user_intent` field | every call passing levels 1 and 2 while the aggregate is still wrong — the reference case is 268 furniture placements where every call succeeded and 104 landed inside walls |
+
+Level 3 is what the rest of this document describes. It is not being replaced —
+it is the one level that was already built correctly, and it stays the authority
+for "did the actual work succeed," because a route handler can only ever certify
+its own operation, never the user's full request.
+
 ### Three working assumptions the system is built around
 
 - **Absence of an error is not proof the operation happened.** Measured:
-  `MoveElement` returned success without moving anything. Every mutation is
-  verified against the diff of the next checkpoint — not against the tool's
-  return code.
+  `MoveElement` returned success without moving anything — see Level 1/2 above
+  for where this is now caught at the source, and the checkpoint diff for the
+  independent, batch-level confirmation that always applies regardless.
 - **A 500 response carrying `TRACKER_OK` is planned success, not failure.**
   Read-only passes deliberately raise at the end to force Revit to roll back the
   host transaction — so a state capture never pollutes the user's Undo. A read
