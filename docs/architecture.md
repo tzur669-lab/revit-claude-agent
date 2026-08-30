@@ -64,18 +64,26 @@ as JSON on the clipboard, ready to paste into a conversation with Claude. Not
 part of the agent loop — a standalone helper for the reverse direction: a human
 prepares data for Claude, not Claude acting in Revit.
 
-> **gotcha — hebrew encoding**
-> Non-ASCII text typed directly as a parameter to any `mcp__revit__` tool is
-> corrupted before it reaches IronPython: classic double-encoding, every
-> character becomes two wrong bytes, and the comparison fails silently — 0
-> results, not an error. Inside `execute_revit_code` the fix is fully reversible:
-> `s.encode("latin-1").decode("utf-8")`. In the text parameters of the friendly
-> tools (`type_name`, `level_name`) there is no such fix — there you must
-> identify by numeric `ElementId`, not by name.
+> **gotcha — hebrew encoding (inbound half fixed at the route layer, 2026-08-24)**
+> Non-ASCII text sent as a parameter to any `mcp__revit__` tool used to be
+> corrupted before it reached IronPython: pyRevit's own request-body parsing
+> decodes the UTF-8 bytes as Latin-1, one wrong "character" per original byte,
+> and a comparison then failed silently — 0 results, no error.
 >
-> This repo's fork applies a related fix on the Revit side: `_safe_str` /
-> `normalize_string` / `sanitize_string` no longer strip non-ASCII to `?`, so
-> Hebrew read **out** of the model survives. See `mcp-server/PATCH-NOTES.md`.
+> This repo's fork fixes it where every route handler reads its request body:
+> `repair_hebrew_in()` (`revit_mcp/utils.py`) recursively repairs every string
+> in the parsed JSON payload before any field is read, and is called first
+> thing in all 20 handlers — the friendly tools (`create_room`, `place_family`,
+> `type_name`, `level_name`, ...) exactly as much as `execute_revit_code`. An
+> earlier attempt patched pyRevit core's own request handler instead; that does
+> not work, because pyRevit runs a route handler in a different engine scope
+> than the module that registers it (see the comment at the top of
+> `mcp-server/startup.py`) - the fix has to sit inside each handler, which is
+> why it is 20 near-identical call sites rather than one shared patch.
+>
+> Text read **out** of Revit has a companion, older fix: `_safe_str` /
+> `normalize_string` / `sanitize_string` no longer strip non-ASCII to `?`. See
+> `mcp-server/PATCH-NOTES.md` for both.
 
 ---
 
