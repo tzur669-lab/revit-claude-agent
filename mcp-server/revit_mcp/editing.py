@@ -4,7 +4,7 @@ Editing Module for Revit MCP
 Handles element deletion, modification, and selection retrieval
 """
 
-from utils import get_element_name, make_element_id, get_element_id_value, suppress_warnings, repair_hebrew_in
+from utils import get_element_name, make_element_id, get_element_id_value, suppress_warnings, repair_hebrew_in, commit_verified, param_read_matches
 from pyrevit import routes, revit, DB
 import json
 import traceback
@@ -74,10 +74,34 @@ def register_editing_routes(api):
                             if del_id_int != primary_id and del_id_int not in cascaded_ids:
                                 cascaded_ids.append(del_id_int)
 
-                t.Commit()
+                tx_ok, tx_status = commit_verified(t)
+                if not tx_ok:
+                    return routes.make_response(
+                        data={
+                            "status": "error",
+                            "tx_status": tx_status,
+                            "tx_ok": tx_ok,
+                            "error": "Transaction did not commit (tx_status={}) - no elements were deleted.".format(tx_status),
+                        },
+                        status=500,
+                    )
 
                 # Remove primary IDs from cascaded list
                 cascaded_ids = [cid for cid in cascaded_ids if cid not in deleted_ids]
+
+                # Level 2: each originally-requested element must no longer
+                # resolve. Cascaded deletions are a bonus/side effect, not
+                # part of this operation's own contract.
+                still_exists = [get_element_id_value(eid) for eid in elements_to_delete
+                                 if doc.GetElement(eid) is not None]
+                verified = {
+                    "ok": len(still_exists) == 0,
+                    "method": "element_absent",
+                    "expected": {"count": len(elements_to_delete)},
+                    "actual": {"count_deleted": len(elements_to_delete) - len(still_exists)},
+                }
+                if still_exists:
+                    verified["failures"] = [{"id": i} for i in still_exists[:50]]
 
                 message = "Deleted {} element{}".format(
                     len(deleted_ids),
@@ -95,6 +119,9 @@ def register_editing_routes(api):
                         "deleted_count": len(deleted_ids),
                         "deleted_ids": deleted_ids,
                         "cascaded_ids": cascaded_ids,
+                        "tx_status": tx_status,
+                        "tx_ok": tx_ok,
+                        "verified": verified,
                         "message": message,
                     }
                 )
@@ -158,6 +185,7 @@ def register_editing_routes(api):
             try:
                 changes = []
                 failed = []
+                to_verify = []  # (param_name, storage_type, intended) - set() didn't raise
 
                 for param_name, new_value in parameters.items():
                     param = elem.LookupParameter(param_name)
@@ -221,13 +249,54 @@ def register_editing_routes(api):
                             "new_value": str(new_value),
                             "status": "set",
                         })
+                        to_verify.append((param_name, param.StorageType, new_value))
                     except Exception as set_err:
                         failed.append({
                             "parameter": param_name,
                             "reason": "set failed: {}".format(str(set_err)),
                         })
 
-                t.Commit()
+                tx_ok, tx_status = commit_verified(t)
+                if not tx_ok:
+                    return routes.make_response(
+                        data={
+                            "status": "error",
+                            "element_id": element_id,
+                            "tx_status": tx_status,
+                            "tx_ok": tx_ok,
+                            "error": "Transaction did not commit (tx_status={}) - no parameters were changed.".format(tx_status),
+                        },
+                        status=500,
+                    )
+
+                # Level 2: re-read each parameter that Set() didn't raise on,
+                # AFTER commit - Set() not raising is not proof the value
+                # actually holds once Revit's regeneration finishes running.
+                elem_after = doc.GetElement(elem_id)
+                verify_failures = []
+                for param_name, storage_type, intended in to_verify:
+                    p = elem_after.LookupParameter(param_name)
+                    if p is None:
+                        verify_failures.append({"parameter": param_name, "reason": "not found on re-read"})
+                        continue
+                    ok, actual_str = param_read_matches(p, storage_type, intended)
+                    if not ok:
+                        verify_failures.append({
+                            "parameter": param_name,
+                            "expected": str(intended),
+                            "actual": actual_str,
+                        })
+                verified = {
+                    "ok": (len(verify_failures) == 0) if to_verify else None,
+                    "method": "param_read_back",
+                    "expected": {"count": len(to_verify)},
+                    "actual": {"count_ok": len(to_verify) - len(verify_failures)},
+                }
+                if not to_verify:
+                    verified["status"] = "not_checked"
+                    verified["reason"] = "No parameter was successfully set (see failed)"
+                if verify_failures:
+                    verified["failures"] = verify_failures[:50]
 
                 message = "Modified {} parameter{} on element {}".format(
                     len(changes),
@@ -241,6 +310,9 @@ def register_editing_routes(api):
                         "element_id": element_id,
                         "changes": changes,
                         "failed": failed,
+                        "tx_status": tx_status,
+                        "tx_ok": tx_ok,
+                        "verified": verified,
                         "message": message,
                     }
                 )

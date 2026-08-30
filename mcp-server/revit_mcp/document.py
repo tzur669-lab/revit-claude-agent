@@ -11,9 +11,37 @@ from pyrevit import routes, revit, DB
 from utils import repair_hebrew_in
 import json
 import os
+import time
 import logging
 
 logger = logging.getLogger(__name__)
+
+# How recent a file's mtime must be, after Save()/SaveAs() returns, to count
+# as evidence the write actually happened. Save()/SaveAs() are void calls -
+# unlike Transaction.Commit() there is no status to read - so this is the
+# only available post-condition. Provisional; generous enough to tolerate
+# slow disks/antivirus scanning without papering over a genuine no-op.
+SAVE_RECENCY_SECONDS = 30.0
+
+
+def _verify_file_written(path):
+    """Post-condition for Save()/SaveAs(): the file must exist and its mtime
+    must be recent enough to plausibly be from the write that just happened.
+    Save()/SaveAs() throw on real failure, but that alone does not prove a
+    write reached disk (e.g. Revit's own retained-backup workflow, or a
+    virtualised/networked path a test double could stub); this is a cheap,
+    honest check rather than trusting the absence of an exception."""
+    try:
+        if not path or not os.path.exists(path):
+            return {"ok": False, "method": "file_mtime", "reason": "File does not exist after save"}
+        age_s = time.time() - os.path.getmtime(path)
+        ok = age_s <= SAVE_RECENCY_SECONDS
+        result = {"ok": ok, "method": "file_mtime", "actual": {"age_seconds": round(age_s, 1)}}
+        if not ok:
+            result["reason"] = "File exists but its mtime is older than {:.0f}s - save may not have written it".format(SAVE_RECENCY_SECONDS)
+        return result
+    except Exception as e:
+        return {"ok": None, "status": "not_checked", "reason": "Could not stat file: {}".format(str(e))}
 
 
 def register_document_routes(api):
@@ -72,10 +100,12 @@ def register_document_routes(api):
                 save_opts.OverwriteExistingFile = overwrite
                 model_path = DB.ModelPathUtils.ConvertUserVisiblePathToModelPath(file_path)
                 doc.SaveAs(model_path, save_opts)
+                verified = _verify_file_written(file_path)
                 return routes.make_response(data={
                     "status": "success",
                     "operation": "save_as",
                     "file_path": file_path,
+                    "verified": verified,
                     "message": "Document saved to {}".format(file_path),
                 })
 
@@ -89,10 +119,12 @@ def register_document_routes(api):
 
             # Save in place
             doc.Save()
+            verified = _verify_file_written(path_on_disk)
             return routes.make_response(data={
                 "status": "success",
                 "operation": "save",
                 "file_path": path_on_disk,
+                "verified": verified,
                 "message": "Document saved",
             })
 

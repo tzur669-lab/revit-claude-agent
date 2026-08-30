@@ -4,7 +4,7 @@ MEP Module for Revit MCP
 Handles duct, pipe, and MEP system creation
 """
 
-from utils import get_element_name, get_element_id_value, make_element_id, suppress_warnings, repair_hebrew_in
+from utils import get_element_name, get_element_id_value, make_element_id, suppress_warnings, repair_hebrew_in, commit_verified, verify_created_elements
 from pyrevit import routes, revit, DB
 import json
 import traceback
@@ -160,15 +160,31 @@ def register_mep_routes(api):
                     if h_param and not h_param.IsReadOnly:
                         h_param.Set(float(height) * MM_TO_FEET)
 
-                t.Commit()
+                tx_ok, tx_status = commit_verified(t)
+                if not tx_ok:
+                    return routes.make_response(
+                        data={
+                            "status": "error",
+                            "tx_status": tx_status,
+                            "tx_ok": tx_ok,
+                            "error": "Transaction did not commit (tx_status={}) - no duct was created.".format(tx_status),
+                        },
+                        status=500,
+                    )
+
+                duct_id = get_element_id_value(duct)
+                verified = verify_created_elements(doc, [(duct_id, int(DB.BuiltInCategory.OST_DuctCurves))])
 
                 return routes.make_response(
                     data={
                         "status": "success",
-                        "duct_id": get_element_id_value(duct),
+                        "duct_id": duct_id,
                         "system_type": get_element_name(target_system_type) if target_system_type else "None",
                         "duct_type": get_element_name(target_duct_type),
                         "level": get_element_name(target_level),
+                        "tx_status": tx_status,
+                        "tx_ok": tx_ok,
+                        "verified": verified,
                         "message": "Created duct on level '{}'".format(get_element_name(target_level)),
                     }
                 )
@@ -312,15 +328,31 @@ def register_mep_routes(api):
                     if d_param and not d_param.IsReadOnly:
                         d_param.Set(float(diameter) * MM_TO_FEET)
 
-                t.Commit()
+                tx_ok, tx_status = commit_verified(t)
+                if not tx_ok:
+                    return routes.make_response(
+                        data={
+                            "status": "error",
+                            "tx_status": tx_status,
+                            "tx_ok": tx_ok,
+                            "error": "Transaction did not commit (tx_status={}) - no pipe was created.".format(tx_status),
+                        },
+                        status=500,
+                    )
+
+                pipe_id = get_element_id_value(pipe)
+                verified = verify_created_elements(doc, [(pipe_id, int(DB.BuiltInCategory.OST_PipeCurves))])
 
                 return routes.make_response(
                     data={
                         "status": "success",
-                        "pipe_id": get_element_id_value(pipe),
+                        "pipe_id": pipe_id,
                         "system_type": get_element_name(target_system_type) if target_system_type else "None",
                         "pipe_type": get_element_name(target_pipe_type),
                         "level": get_element_name(target_level),
+                        "tx_status": tx_status,
+                        "tx_ok": tx_ok,
+                        "verified": verified,
                         "message": "Created pipe on level '{}'".format(get_element_name(target_level)),
                     }
                 )
@@ -473,16 +505,50 @@ def register_mep_routes(api):
                     if name_param and not name_param.IsReadOnly:
                         name_param.Set(system_name)
 
-                t.Commit()
+                tx_ok, tx_status = commit_verified(t)
+                if not tx_ok:
+                    return routes.make_response(
+                        data={
+                            "status": "error",
+                            "tx_status": tx_status,
+                            "tx_ok": tx_ok,
+                            "error": "Transaction did not commit (tx_status={}) - no system was created or renamed.".format(tx_status),
+                        },
+                        status=500,
+                    )
 
                 if new_system:
+                    system_id = get_element_id_value(new_system)
+                    system_after = doc.GetElement(DB.ElementId(system_id))
+                    actual_name = ""
+                    if system_after is not None:
+                        try:
+                            np = system_after.LookupParameter("System Name")
+                            if np is None:
+                                np = system_after.LookupParameter("Comments")
+                            if np:
+                                actual_name = np.AsString() or ""
+                        except Exception:
+                            pass
+                    verified = {
+                        "ok": (system_after is not None) and (actual_name == system_name),
+                        "method": "element_exists_and_name",
+                        "expected": {"name": system_name},
+                        "actual": {"name": actual_name, "resolves": system_after is not None},
+                    }
+                    if not verified["ok"]:
+                        verified["reason"] = "System does not resolve or its name does not match what was requested"
+
                     return routes.make_response(
                         data={
                             "status": "success",
-                            "system_id": get_element_id_value(new_system),
+                            "system_id": system_id,
                             "system_name": system_name,
                             "system_type": system_type,
                             "element_count": len(element_ids),
+                            "tx_status": tx_status,
+                            "tx_ok": tx_ok,
+                            "verified": verified,
                             "message": "Created {} system '{}'".format(system_type, system_name),
                         }
                     )

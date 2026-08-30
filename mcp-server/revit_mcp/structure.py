@@ -4,7 +4,7 @@ Structure Module for Revit MCP
 Handles grid creation and structural framing placement
 """
 
-from utils import get_element_name, find_family_symbol_safely, get_element_id_value, suppress_warnings, repair_hebrew_in
+from utils import get_element_name, find_family_symbol_safely, get_element_id_value, suppress_warnings, repair_hebrew_in, commit_verified, verify_created_elements
 from pyrevit import routes, revit, DB
 import json
 import traceback
@@ -83,12 +83,27 @@ def register_structure_routes(api):
                             ))
 
                     grid_name = get_element_name(grid)
+                    grid_id = get_element_id_value(grid)
                     created.append({
-                        "id": get_element_id_value(grid),
+                        "id": grid_id,
                         "name": grid_name,
                     })
 
-                t.Commit()
+                tx_ok, tx_status = commit_verified(t)
+                if not tx_ok:
+                    return routes.make_response(
+                        data={
+                            "status": "error",
+                            "tx_status": tx_status,
+                            "tx_ok": tx_ok,
+                            "error": "Transaction did not commit (tx_status={}) - no grids were created.".format(tx_status),
+                        },
+                        status=500,
+                    )
+
+                verified = verify_created_elements(
+                    doc, [(c["id"], int(DB.BuiltInCategory.OST_Grids)) for c in created]
+                )
 
                 message = "Created {} grid line{}".format(
                     len(created),
@@ -100,6 +115,9 @@ def register_structure_routes(api):
                         "status": "success",
                         "created": created,
                         "count": len(created),
+                        "tx_status": tx_status,
+                        "tx_ok": tx_ok,
+                        "verified": verified,
                         "message": message,
                     }
                 )
@@ -257,14 +275,29 @@ def register_structure_routes(api):
                     beam_type = get_element_name(target_symbol)
                     beam_level = get_element_name(target_level) if target_level else "Unknown"
 
+                    beam_id = get_element_id_value(beam)
                     created.append({
-                        "id": get_element_id_value(beam),
+                        "id": beam_id,
                         "name": name,
                         "type": beam_type,
                         "level": beam_level,
                     })
 
-                t.Commit()
+                tx_ok, tx_status = commit_verified(t)
+                if not tx_ok:
+                    return routes.make_response(
+                        data={
+                            "status": "error",
+                            "tx_status": tx_status,
+                            "tx_ok": tx_ok,
+                            "error": "Transaction did not commit (tx_status={}) - no framing was created.".format(tx_status),
+                        },
+                        status=500,
+                    )
+
+                verified = verify_created_elements(
+                    doc, [(c["id"], int(DB.BuiltInCategory.OST_StructuralFraming)) for c in created]
+                )
 
                 level_msg = ""
                 if created and created[0].get("level"):
@@ -281,6 +314,9 @@ def register_structure_routes(api):
                         "status": "success",
                         "created": created,
                         "count": len(created),
+                        "tx_status": tx_status,
+                        "tx_ok": tx_ok,
+                        "verified": verified,
                         "message": message,
                     }
                 )

@@ -4,7 +4,7 @@ Annotation Module for Revit MCP
 Handles dimensions and wall tagging
 """
 
-from utils import get_element_name, get_element_id_value, make_element_id, suppress_warnings, repair_hebrew_in
+from utils import get_element_name, get_element_id_value, make_element_id, suppress_warnings, repair_hebrew_in, commit_verified
 from pyrevit import routes, revit, DB
 import json
 import traceback
@@ -182,7 +182,30 @@ def register_annotation_routes(api):
                         "value": dim_value or "N/A",
                     })
 
-                t.Commit()
+                tx_ok, tx_status = commit_verified(t)
+                if not tx_ok:
+                    return routes.make_response(
+                        data={
+                            "status": "error",
+                            "tx_status": tx_status,
+                            "tx_ok": tx_ok,
+                            "error": "Transaction did not commit (tx_status={}) - no dimension was created.".format(tx_status),
+                        },
+                        status=500,
+                    )
+
+                still_exists = [c["id"] for c in created if doc.GetElement(DB.ElementId(c["id"])) is None]
+                verified = {
+                    "ok": len(still_exists) == 0 if created else None,
+                    "method": "element_exists",
+                    "expected": {"count": len(created)},
+                    "actual": {"count_ok": len(created) - len(still_exists)},
+                }
+                if not created:
+                    verified["status"] = "not_checked"
+                    verified["reason"] = "No dimension was created"
+                if still_exists:
+                    verified["failures"] = [{"id": i} for i in still_exists]
 
                 message = "Created {} dimension annotation{} in the current view".format(
                     len(created),
@@ -194,6 +217,9 @@ def register_annotation_routes(api):
                         "status": "success",
                         "created": created,
                         "count": len(created),
+                        "tx_status": tx_status,
+                        "tx_ok": tx_ok,
+                        "verified": verified,
                         "message": message,
                     }
                 )
@@ -353,7 +379,17 @@ def register_annotation_routes(api):
                         skipped.append({"wall_id": wall_id_val, "reason": reason})
                         continue
 
-                t.Commit()
+                tx_ok, tx_status = commit_verified(t)
+                if not tx_ok:
+                    return routes.make_response(
+                        data={
+                            "status": "error",
+                            "tx_status": tx_status,
+                            "tx_ok": tx_ok,
+                            "error": "Transaction did not commit (tx_status={}) - no walls were tagged.".format(tx_status),
+                        },
+                        status=500,
+                    )
 
                 walls_total = len(walls)
                 message = "Tagged {} wall{} ({} already tagged, {} failed, {} total in view)".format(
@@ -369,6 +405,8 @@ def register_annotation_routes(api):
                     "tags_placed": tags_placed,
                     "walls_already_tagged": walls_already_tagged,
                     "walls_total": walls_total,
+                    "tx_status": tx_status,
+                    "tx_ok": tx_ok,
                     "message": message,
                 }
                 if skipped:

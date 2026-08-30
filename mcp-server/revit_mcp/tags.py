@@ -4,7 +4,7 @@ Tags Module for Revit MCP
 Handles element tagging with annotation symbols
 """
 
-from utils import get_element_name, get_element_id_value, make_element_id, suppress_warnings, repair_hebrew_in
+from utils import get_element_name, get_element_id_value, make_element_id, suppress_warnings, repair_hebrew_in, commit_verified
 from pyrevit import routes, revit, DB
 import json
 import traceback
@@ -218,7 +218,30 @@ def register_tag_routes(api):
                             "reason": "Tag failed: {}".format(str(tag_err)),
                         })
 
-                t.Commit()
+                tx_ok, tx_status = commit_verified(t)
+                if not tx_ok:
+                    return routes.make_response(
+                        data={
+                            "status": "error",
+                            "tx_status": tx_status,
+                            "tx_ok": tx_ok,
+                            "error": "Transaction did not commit (tx_status={}) - no tags were created.".format(tx_status),
+                        },
+                        status=500,
+                    )
+
+                still_exists = [tid for tid in tagged_ids if doc.GetElement(DB.ElementId(tid)) is None]
+                verified = {
+                    "ok": len(still_exists) == 0 if tagged_ids else None,
+                    "method": "element_exists",
+                    "expected": {"count": len(tagged_ids)},
+                    "actual": {"count_ok": len(tagged_ids) - len(still_exists)},
+                }
+                if not tagged_ids:
+                    verified["status"] = "not_checked"
+                    verified["reason"] = "No tag was created"
+                if still_exists:
+                    verified["failures"] = [{"id": i} for i in still_exists]
 
                 return routes.make_response(
                     data={
@@ -226,6 +249,9 @@ def register_tag_routes(api):
                         "tagged_count": len(tagged_ids),
                         "tag_ids": tagged_ids,
                         "skipped": skipped,
+                        "tx_status": tx_status,
+                        "tx_ok": tx_ok,
+                        "verified": verified,
                         "message": "Tagged {} element{}, {} skipped".format(
                             len(tagged_ids),
                             "s" if len(tagged_ids) != 1 else "",

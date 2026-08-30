@@ -4,7 +4,7 @@ Parameters Module for Revit MCP
 Handles reading element properties and setting parameter values
 """
 
-from utils import get_element_name, get_element_id_value, make_element_id, suppress_warnings, repair_hebrew_in
+from utils import get_element_name, get_element_id_value, make_element_id, suppress_warnings, repair_hebrew_in, commit_verified, param_read_matches
 from pyrevit import routes, revit, DB
 import json
 import traceback
@@ -269,19 +269,62 @@ def register_parameter_routes(api):
             suppress_warnings(t)
 
             try:
+                storage_type = param.StorageType
                 # Set value based on storage type
-                if param.StorageType == DB.StorageType.String:
+                if storage_type == DB.StorageType.String:
                     param.Set(str(value))
-                elif param.StorageType == DB.StorageType.Integer:
+                elif storage_type == DB.StorageType.Integer:
                     param.Set(int(value))
-                elif param.StorageType == DB.StorageType.Double:
+                elif storage_type == DB.StorageType.Double:
                     param.Set(float(value))
-                elif param.StorageType == DB.StorageType.ElementId:
+                elif storage_type == DB.StorageType.ElementId:
                     param.Set(make_element_id(value))
 
-                t.Commit()
+                tx_ok, tx_status = commit_verified(t)
+                if not tx_ok:
+                    return routes.make_response(
+                        data={
+                            "status": "error",
+                            "element_id": int(element_id),
+                            "parameter_name": parameter_name,
+                            "tx_status": tx_status,
+                            "tx_ok": tx_ok,
+                            "error": "Transaction did not commit (tx_status={}) - '{}' is unchanged.".format(tx_status, parameter_name),
+                        },
+                        status=500,
+                    )
 
-                new_value = _get_param_value_display(param, doc)
+                # Level 2: re-read AFTER commit and compare to the typed
+                # value requested - Set() not raising, and Commit() being
+                # Committed, are both silent about whether Revit's
+                # regeneration accepted the value or reverted/clamped it.
+                elem_after = doc.GetElement(elem_id)
+                param_after = elem_after.LookupParameter(parameter_name)
+                if param_after is None:
+                    type_id = elem_after.GetTypeId()
+                    if type_id and type_id != DB.ElementId.InvalidElementId:
+                        elem_type_after = doc.GetElement(type_id)
+                        if elem_type_after:
+                            param_after = elem_type_after.LookupParameter(parameter_name)
+
+                if param_after is None:
+                    verified = {
+                        "ok": None,
+                        "status": "not_checked",
+                        "reason": "Parameter not found on re-read after commit",
+                    }
+                    new_value = str(value)
+                else:
+                    ok, actual_str = param_read_matches(param_after, storage_type, value)
+                    verified = {
+                        "ok": ok,
+                        "method": "param_read_back",
+                        "expected": str(value),
+                        "actual": actual_str,
+                    }
+                    if not ok:
+                        verified["reason"] = "value after commit does not match what was requested"
+                    new_value = actual_str
 
                 return routes.make_response(
                     data={
@@ -289,9 +332,12 @@ def register_parameter_routes(api):
                         "element_id": int(element_id),
                         "parameter_name": parameter_name,
                         "old_value": old_value,
-                        "new_value": str(value),
+                        "new_value": new_value,
+                        "tx_status": tx_status,
+                        "tx_ok": tx_ok,
+                        "verified": verified,
                         "message": "Set '{}' from '{}' to '{}' on element {}".format(
-                            parameter_name, old_value, value, element_id
+                            parameter_name, old_value, new_value, element_id
                         ),
                     }
                 )

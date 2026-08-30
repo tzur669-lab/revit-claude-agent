@@ -4,7 +4,7 @@ Interop Module for Revit MCP
 Handles IFC export and external file linking/importing
 """
 
-from utils import get_element_name, get_element_id_value, suppress_warnings, repair_hebrew_in
+from utils import get_element_name, get_element_id_value, suppress_warnings, repair_hebrew_in, commit_verified
 from pyrevit import routes, revit, DB
 import clr
 import json
@@ -95,19 +95,44 @@ def register_interop_routes(api):
 
             try:
                 doc.Export(output_dir or ".", file_name, ifc_options)
-                t.Commit()
+                tx_ok, tx_status = commit_verified(t)
             except Exception as tx_error:
                 if t.HasStarted() and not t.HasEnded():
                     t.RollBack()
                 raise tx_error
 
+            if not tx_ok:
+                return routes.make_response(
+                    data={
+                        "status": "error",
+                        "tx_status": tx_status,
+                        "tx_ok": tx_ok,
+                        "error": "Transaction did not commit (tx_status={}).".format(tx_status),
+                    },
+                    status=500,
+                )
+
             # Get file size
+            file_exists = False
             file_size_kb = 0
             try:
-                if os.path.exists(file_path):
+                file_exists = os.path.exists(file_path)
+                if file_exists:
                     file_size_kb = int(os.path.getsize(file_path) / 1024)
             except Exception:
                 pass
+
+            # Level 2: this operation's real product is a file on disk, not
+            # model state - tx_status Committed says nothing about whether
+            # doc.Export actually wrote the IFC file.
+            verified = {
+                "ok": file_exists and file_size_kb > 0,
+                "method": "file_exists",
+                "expected": {"file_path": file_path},
+                "actual": {"exists": file_exists, "size_kb": file_size_kb},
+            }
+            if not verified["ok"]:
+                verified["reason"] = "Export reported success but the output file does not exist or is empty"
 
             return routes.make_response(
                 data={
@@ -115,6 +140,9 @@ def register_interop_routes(api):
                     "file_path": file_path,
                     "file_size_kb": file_size_kb,
                     "ifc_version": ifc_version,
+                    "tx_status": tx_status,
+                    "tx_ok": tx_ok,
+                    "verified": verified,
                     "message": "Exported IFC to '{}' ({} KB)".format(file_path, file_size_kb),
                 }
             )
@@ -216,7 +244,34 @@ def register_interop_routes(api):
                         status=400,
                     )
 
-                t.Commit()
+                tx_ok, tx_status = commit_verified(t)
+                if not tx_ok:
+                    return routes.make_response(
+                        data={
+                            "status": "error",
+                            "tx_status": tx_status,
+                            "tx_ok": tx_ok,
+                            "error": "Transaction did not commit (tx_status={}) - nothing was linked or imported.".format(tx_status),
+                        },
+                        status=500,
+                    )
+
+                if result_id is not None:
+                    resolves = doc.GetElement(DB.ElementId(result_id)) is not None
+                    verified = {
+                        "ok": resolves,
+                        "method": "element_exists",
+                        "expected": {"count": 1},
+                        "actual": {"count_ok": 1 if resolves else 0},
+                    }
+                    if not resolves:
+                        verified["failures"] = [{"id": result_id}]
+                else:
+                    verified = {
+                        "ok": None,
+                        "status": "not_checked",
+                        "reason": "No element id was captured for this file type/mode",
+                    }
 
                 return routes.make_response(
                     data={
@@ -225,6 +280,9 @@ def register_interop_routes(api):
                         "file_name": file_name,
                         "file_type": file_type,
                         "mode": mode,
+                        "tx_status": tx_status,
+                        "tx_ok": tx_ok,
+                        "verified": verified,
                         "message": "{}ed file '{}'".format(
                             mode.capitalize(), file_name
                         ),

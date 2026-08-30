@@ -4,7 +4,7 @@ Color management functionality for Revit elements
 Provides tools for color splashing elements based on parameter values
 """
 
-from utils import get_element_id_value, suppress_warnings, repair_hebrew_in
+from utils import get_element_id_value, suppress_warnings, repair_hebrew_in, commit_verified
 from pyrevit import routes, DB
 import json
 import logging
@@ -860,7 +860,15 @@ def color_elements_by_parameter(
                             e,
                         )
 
-            t.Commit()
+            tx_ok, tx_status = commit_verified(t)
+
+        if not tx_ok:
+            return {
+                "status": "error",
+                "tx_status": tx_status,
+                "tx_ok": tx_ok,
+                "message": "Transaction did not commit (tx_status={}) - no colors were applied.".format(tx_status),
+            }
 
         result = {
             "status": "success",
@@ -870,6 +878,13 @@ def color_elements_by_parameter(
             "category": category_name,
             "parameter": parameter_name,
             "color_assignments": color_assignments,
+            "tx_status": tx_status,
+            "tx_ok": tx_ok,
+            "verified": {
+                "ok": None,
+                "status": "not_checked",
+                "reason": "Re-reading a view's per-element graphic overrides is not implemented in this milestone; transaction-level verification (tx_status) still applies.",
+            },
             "statistics": {
                 "total_elements": len(elements),
                 "elements_colored": elements_colored,
@@ -978,7 +993,15 @@ def clear_element_colors(doc, category_name):
                         e,
                     )
 
-            t.Commit()
+            tx_ok, tx_status = commit_verified(t)
+
+        if not tx_ok:
+            return {
+                "status": "error",
+                "tx_status": tx_status,
+                "tx_ok": tx_ok,
+                "message": "Transaction did not commit (tx_status={}) - colors were not cleared.".format(tx_status),
+            }
 
         return {
             "status": "success",
@@ -987,6 +1010,13 @@ def clear_element_colors(doc, category_name):
             ),
             "category": category_name,
             "elements_processed": elements_cleared,
+            "tx_status": tx_status,
+            "tx_ok": tx_ok,
+            "verified": {
+                "ok": None,
+                "status": "not_checked",
+                "reason": "Re-reading a view's per-element graphic overrides is not implemented in this milestone; transaction-level verification (tx_status) still applies.",
+            },
         }
 
     except Exception as e:

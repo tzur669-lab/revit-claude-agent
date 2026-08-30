@@ -4,7 +4,7 @@ Detail Module for Revit MCP
 Handles detail line creation for view-specific annotation
 """
 
-from utils import get_element_name, get_element_id_value, suppress_warnings, repair_hebrew_in
+from utils import get_element_name, get_element_id_value, suppress_warnings, repair_hebrew_in, commit_verified, verify_created_elements
 from pyrevit import routes, revit, DB
 import json
 import traceback
@@ -127,15 +127,30 @@ def register_detail_routes(api):
                     except Exception as style_err:
                         logger.debug("Could not set line style: {}".format(str(style_err)))
 
-                t.Commit()
+                tx_ok, tx_status = commit_verified(t)
+                if not tx_ok:
+                    return routes.make_response(
+                        data={
+                            "status": "error",
+                            "tx_status": tx_status,
+                            "tx_ok": tx_ok,
+                            "error": "Transaction did not commit (tx_status={}) - no detail line was created.".format(tx_status),
+                        },
+                        status=500,
+                    )
 
+                line_id = get_element_id_value(detail_curve)
+                verified = verify_created_elements(doc, [(line_id, int(DB.BuiltInCategory.OST_Lines))])
                 actual_view_name = get_element_name(target_view)
 
                 return routes.make_response(
                     data={
                         "status": "success",
-                        "line_id": get_element_id_value(detail_curve),
+                        "line_id": line_id,
                         "view_name": actual_view_name,
+                        "tx_status": tx_status,
+                        "tx_ok": tx_ok,
+                        "verified": verified,
                         "message": "Created detail line in view '{}'".format(actual_view_name),
                     }
                 )

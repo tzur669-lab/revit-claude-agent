@@ -5,7 +5,7 @@ Handles creation of line-based elements (walls, beams), surface-based
 elements (floors, roofs, ceilings), and levels.
 """
 
-from utils import get_element_name, get_element_id_value, suppress_warnings, repair_hebrew_in
+from utils import get_element_name, get_element_id_value, suppress_warnings, repair_hebrew_in, commit_verified, verify_created_elements
 from pyrevit import routes, revit, DB
 from System.Collections.Generic import List
 import json
@@ -88,6 +88,7 @@ def register_building_routes(api):
 
             created = []
             errors = []
+            id_category_pairs = []  # (id, expected BuiltInCategory) - level 2
 
             t = DB.Transaction(doc, "Create Line-Based Elements")
             t.Start()
@@ -185,13 +186,15 @@ def register_building_routes(api):
                                 is_structural,
                             )
 
+                            wall_id = get_element_id_value(wall)
                             created.append({
-                                "id": get_element_id_value(wall),
+                                "id": wall_id,
                                 "name": elem.get("name", ""),
                                 "type": get_element_name(wall_type),
                                 "level": get_element_name(level),
                                 "element_type": "wall",
                             })
+                            id_category_pairs.append((wall_id, int(DB.BuiltInCategory.OST_Walls)))
 
                         elif element_type == "beam":
                             type_name = elem.get("type_name")
@@ -226,13 +229,15 @@ def register_building_routes(api):
                                 DB.Structure.StructuralType.Beam,
                             )
 
+                            beam_id = get_element_id_value(beam)
                             created.append({
-                                "id": get_element_id_value(beam),
+                                "id": beam_id,
                                 "name": elem.get("name", ""),
                                 "type": get_element_name(beam_type),
                                 "level": get_element_name(level),
                                 "element_type": "beam",
                             })
+                            id_category_pairs.append((beam_id, int(DB.BuiltInCategory.OST_StructuralFraming)))
 
                         else:
                             errors.append(
@@ -246,7 +251,17 @@ def register_building_routes(api):
                         errors.append("Element {}: {}".format(idx, str(elem_err)))
                         continue
 
-                t.Commit()
+                tx_ok, tx_status = commit_verified(t)
+                if not tx_ok:
+                    return routes.make_response(
+                        data={
+                            "status": "error",
+                            "tx_status": tx_status,
+                            "tx_ok": tx_ok,
+                            "error": "Transaction did not commit (tx_status={}) - nothing was created.".format(tx_status),
+                        },
+                        status=500,
+                    )
 
             except Exception as tx_err:
                 if t.HasStarted() and not t.HasEnded():
@@ -256,10 +271,15 @@ def register_building_routes(api):
                     status=500,
                 )
 
+            verified = verify_created_elements(doc, id_category_pairs)
+
             response_data = {
                 "status": "success",
                 "created": created,
                 "count": len(created),
+                "tx_status": tx_status,
+                "tx_ok": tx_ok,
+                "verified": verified,
                 "message": "Created {} element(s)".format(len(created)),
             }
             if errors:
@@ -337,6 +357,7 @@ def register_building_routes(api):
 
             created = []
             errors = []
+            id_category_pairs = []  # (id, expected BuiltInCategory) - level 2
 
             t = DB.Transaction(doc, "Create Surface-Based Elements")
             t.Start()
@@ -486,13 +507,20 @@ def register_building_routes(api):
                                 if offset_param and not offset_param.IsReadOnly:
                                     offset_param.Set(offset_mm / 304.8)
 
+                            floor_id = get_element_id_value(floor)
                             created.append({
-                                "id": get_element_id_value(floor),
+                                "id": floor_id,
                                 "name": elem.get("name", ""),
                                 "type": get_element_name(floor_type),
                                 "level": get_element_name(level),
                                 "element_type": element_type,
                             })
+                            # Both "floor" and "ceiling" go through DB.Floor.Create
+                            # above - the created element's real category is
+                            # OST_Floors either way, regardless of which the
+                            # caller asked for. Verify what was actually made,
+                            # not the caller's semantic label.
+                            id_category_pairs.append((floor_id, int(DB.BuiltInCategory.OST_Floors)))
 
                         elif element_type == "roof":
                             type_name = elem.get("type_name")
@@ -539,19 +567,31 @@ def register_building_routes(api):
                                 curve_array, level, roof_type, model_curves
                             )
 
+                            roof_id = get_element_id_value(roof)
                             created.append({
-                                "id": get_element_id_value(roof),
+                                "id": roof_id,
                                 "name": elem.get("name", ""),
                                 "type": get_element_name(roof_type),
                                 "level": get_element_name(level),
                                 "element_type": "roof",
                             })
+                            id_category_pairs.append((roof_id, int(DB.BuiltInCategory.OST_Roofs)))
 
                     except Exception as elem_err:
                         errors.append("Element {}: {}".format(idx, str(elem_err)))
                         continue
 
-                t.Commit()
+                tx_ok, tx_status = commit_verified(t)
+                if not tx_ok:
+                    return routes.make_response(
+                        data={
+                            "status": "error",
+                            "tx_status": tx_status,
+                            "tx_ok": tx_ok,
+                            "error": "Transaction did not commit (tx_status={}) - nothing was created.".format(tx_status),
+                        },
+                        status=500,
+                    )
 
             except Exception as tx_err:
                 if t.HasStarted() and not t.HasEnded():
@@ -561,10 +601,15 @@ def register_building_routes(api):
                     status=500,
                 )
 
+            verified = verify_created_elements(doc, id_category_pairs)
+
             response_data = {
                 "status": "success",
                 "created": created,
                 "count": len(created),
+                "tx_status": tx_status,
+                "tx_ok": tx_ok,
+                "verified": verified,
                 "message": "Created {} element(s)".format(len(created)),
             }
             if errors:
@@ -604,6 +649,7 @@ def register_building_routes(api):
 
             created = []
             errors = []
+            id_category_pairs = []  # (id, expected BuiltInCategory) - level 2
 
             t = DB.Transaction(doc, "Create Levels")
             t.Start()
@@ -624,17 +670,29 @@ def register_building_routes(api):
                         if name:
                             new_level.Name = str(name)
 
+                        level_id = get_element_id_value(new_level)
                         created.append({
-                            "id": get_element_id_value(new_level),
+                            "id": level_id,
                             "name": get_element_name(new_level),
                             "elevation_mm": float(elevation_mm),
                         })
+                        id_category_pairs.append((level_id, int(DB.BuiltInCategory.OST_Levels)))
 
                     except Exception as lv_err:
                         errors.append("Level {}: {}".format(idx, str(lv_err)))
                         continue
 
-                t.Commit()
+                tx_ok, tx_status = commit_verified(t)
+                if not tx_ok:
+                    return routes.make_response(
+                        data={
+                            "status": "error",
+                            "tx_status": tx_status,
+                            "tx_ok": tx_ok,
+                            "error": "Transaction did not commit (tx_status={}) - no levels were created.".format(tx_status),
+                        },
+                        status=500,
+                    )
 
             except Exception as tx_err:
                 if t.HasStarted() and not t.HasEnded():
@@ -644,10 +702,15 @@ def register_building_routes(api):
                     status=500,
                 )
 
+            verified = verify_created_elements(doc, id_category_pairs)
+
             response_data = {
                 "status": "success",
                 "created": created,
                 "count": len(created),
+                "tx_status": tx_status,
+                "tx_ok": tx_ok,
+                "verified": verified,
                 "message": "Created {} level(s)".format(len(created)),
             }
             if errors:

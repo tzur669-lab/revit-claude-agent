@@ -4,7 +4,7 @@ Documentation Module for Revit MCP
 Handles sheet creation, schedule creation, and document export
 """
 
-from utils import get_element_name, get_element_id_value, suppress_warnings, repair_hebrew_in
+from utils import get_element_name, get_element_id_value, suppress_warnings, repair_hebrew_in, commit_verified, verify_created_elements
 from pyrevit import routes, revit, DB
 import json
 import traceback
@@ -97,19 +97,34 @@ def register_documentation_routes(api):
                 if sheet_name:
                     new_sheet.Name = sheet_name
 
-                t.Commit()
+                tx_ok, tx_status = commit_verified(t)
+                if not tx_ok:
+                    return routes.make_response(
+                        data={
+                            "status": "error",
+                            "tx_status": tx_status,
+                            "tx_ok": tx_ok,
+                            "error": "Transaction did not commit (tx_status={}) - no sheet was created.".format(tx_status),
+                        },
+                        status=500,
+                    )
 
+                sheet_id = get_element_id_value(new_sheet)
                 tb_name = get_element_name(target_tb)
+                verified = verify_created_elements(doc, [(sheet_id, int(DB.BuiltInCategory.OST_Sheets))])
 
                 return routes.make_response(
                     data={
                         "status": "success",
                         "created": {
-                            "id": get_element_id_value(new_sheet),
+                            "id": sheet_id,
                             "sheet_number": new_sheet.SheetNumber,
                             "sheet_name": new_sheet.Name,
                             "title_block": tb_name,
                         },
+                        "tx_status": tx_status,
+                        "tx_ok": tx_ok,
+                        "verified": verified,
                         "message": "Created sheet {} - {}".format(
                             new_sheet.SheetNumber, new_sheet.Name
                         ),
@@ -226,20 +241,35 @@ def register_documentation_routes(api):
                 except Exception:
                     pass
 
-                t.Commit()
+                tx_ok, tx_status = commit_verified(t)
+                if not tx_ok:
+                    return routes.make_response(
+                        data={
+                            "status": "error",
+                            "tx_status": tx_status,
+                            "tx_ok": tx_ok,
+                            "error": "Transaction did not commit (tx_status={}) - no schedule was created.".format(tx_status),
+                        },
+                        status=500,
+                    )
 
                 # Get category display name
                 cat_display = category_str.replace("OST_", "").lower()
+                sched_id = get_element_id_value(schedule)
+                verified = verify_created_elements(doc, [(sched_id, int(DB.BuiltInCategory.OST_Schedules))])
 
                 result = {
                     "status": "success",
                     "created": {
-                        "id": get_element_id_value(schedule),
+                        "id": sched_id,
                         "name": schedule.Name,
                         "category": cat_display,
                         "fields": fields_added,
                         "row_count": row_count,
                     },
+                    "tx_status": tx_status,
+                    "tx_ok": tx_ok,
+                    "verified": verified,
                     "message": "Created {} schedule with {} field{} and {} row{}".format(
                         cat_display,
                         len(fields_added),
@@ -434,14 +464,40 @@ def register_documentation_routes(api):
                             status=500,
                         )
 
-                t.Commit()
+                tx_ok, tx_status = commit_verified(t)
+                if not tx_ok:
+                    return routes.make_response(
+                        data={
+                            "status": "error",
+                            "tx_status": tx_status,
+                            "tx_ok": tx_ok,
+                            "error": "Transaction did not commit (tx_status={}).".format(tx_status),
+                        },
+                        status=500,
+                    )
 
                 # Get file size
+                file_exists = False
                 try:
-                    if file_path and os.path.exists(file_path):
+                    file_exists = bool(file_path) and os.path.exists(file_path)
+                    if file_exists:
                         file_size_kb = int(os.path.getsize(file_path) / 1024)
                 except Exception:
                     pass
+
+                # Level 2: this operation's real product is a file on disk,
+                # not model state - tx_status being Committed says nothing
+                # about whether Revit's export API actually wrote the file.
+                # Previously file_size_kb could silently read 0 with no
+                # failure signal at all if the export produced nothing.
+                verified = {
+                    "ok": file_exists and file_size_kb > 0,
+                    "method": "file_exists",
+                    "expected": {"file_path": file_path},
+                    "actual": {"exists": file_exists, "size_kb": file_size_kb},
+                }
+                if not verified["ok"]:
+                    verified["reason"] = "Export reported success but the output file does not exist or is empty"
 
                 return routes.make_response(
                     data={
@@ -452,6 +508,9 @@ def register_documentation_routes(api):
                             "file_path": file_path,
                             "file_size_kb": file_size_kb,
                         },
+                        "tx_status": tx_status,
+                        "tx_ok": tx_ok,
+                        "verified": verified,
                         "message": "Exported '{}' to {} ({} KB)".format(
                             actual_view_name, fmt.upper(), file_size_kb
                         ),

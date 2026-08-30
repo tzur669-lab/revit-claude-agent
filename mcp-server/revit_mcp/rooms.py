@@ -4,7 +4,7 @@ Rooms Module for Revit MCP
 Handles room creation and room separation lines
 """
 
-from utils import get_element_name, get_element_id_value, make_element_id, suppress_warnings, repair_hebrew_in
+from utils import get_element_name, get_element_id_value, make_element_id, suppress_warnings, repair_hebrew_in, commit_verified, verify_created_elements
 from pyrevit import routes, revit, DB
 from System.Collections.Generic import List
 import json
@@ -104,12 +104,25 @@ def register_room_routes(api):
                     if number_param and not number_param.IsReadOnly:
                         number_param.Set(room_number)
 
-                t.Commit()
+                tx_ok, tx_status = commit_verified(t)
+                if not tx_ok:
+                    return routes.make_response(
+                        data={
+                            "status": "error",
+                            "tx_status": tx_status,
+                            "tx_ok": tx_ok,
+                            "error": "Transaction did not commit (tx_status={}) - no room was created.".format(tx_status),
+                        },
+                        status=500,
+                    )
+
+                room_id = get_element_id_value(room)
+                room_after = doc.GetElement(DB.ElementId(room_id))
 
                 # Get area after commit
                 area = 0.0
                 try:
-                    area_param = room.LookupParameter("Area")
+                    area_param = room_after.LookupParameter("Area")
                     if area_param and area_param.HasValue:
                         area = round(area_param.AsDouble() * 0.092903, 2)  # sq ft to sq m
                 except Exception:
@@ -117,7 +130,7 @@ def register_room_routes(api):
 
                 actual_name = ""
                 try:
-                    name_p = room.LookupParameter("Name")
+                    name_p = room_after.LookupParameter("Name")
                     if name_p:
                         actual_name = name_p.AsString() or ""
                 except Exception:
@@ -125,20 +138,42 @@ def register_room_routes(api):
 
                 actual_number = ""
                 try:
-                    number_p = room.LookupParameter("Number")
+                    number_p = room_after.LookupParameter("Number")
                     if number_p:
                         actual_number = number_p.AsString() or ""
                 except Exception:
                     pass
 
+                # Level 2: the room must resolve, carry OST_Rooms, AND have a
+                # real enclosed boundary with positive area - "created" a
+                # Room element that is unplaced/unenclosed (Area == 0) is the
+                # measured room-creation trap this project's own RULES.md
+                # room-definition domain exists to catch, and it passes a
+                # naive "does the id resolve?" check.
+                cat_verified = verify_created_elements(doc, [(room_id, int(DB.BuiltInCategory.OST_Rooms))])
+                boundary_ok = area > 0.0
+                verified = {
+                    "ok": bool(cat_verified["ok"]) and boundary_ok,
+                    "method": "room_area",
+                    "expected": {"area_sqm_gt": 0},
+                    "actual": {"area_sqm": area, "category_check": cat_verified["ok"]},
+                }
+                if not boundary_ok:
+                    verified["reason"] = "Room has zero area - unplaced or not enclosed by boundaries"
+                if cat_verified.get("failures"):
+                    verified["failures"] = cat_verified["failures"]
+
                 return routes.make_response(
                     data={
                         "status": "success",
-                        "room_id": get_element_id_value(room),
+                        "room_id": room_id,
                         "name": actual_name,
                         "number": actual_number,
                         "level": level_name,
                         "area": area,
+                        "tx_status": tx_status,
+                        "tx_ok": tx_ok,
+                        "verified": verified,
                         "message": "Room '{}' created on level '{}'".format(
                             actual_name or actual_number or "Unnamed", level_name
                         ),
@@ -266,13 +301,30 @@ def register_room_routes(api):
                     for elem in separator:
                         created_ids.append(get_element_id_value(elem))
 
-                t.Commit()
+                tx_ok, tx_status = commit_verified(t)
+                if not tx_ok:
+                    return routes.make_response(
+                        data={
+                            "status": "error",
+                            "tx_status": tx_status,
+                            "tx_ok": tx_ok,
+                            "error": "Transaction did not commit (tx_status={}) - no separation lines were created.".format(tx_status),
+                        },
+                        status=500,
+                    )
+
+                verified = verify_created_elements(
+                    doc, [(cid, int(DB.BuiltInCategory.OST_RoomSeparationLines)) for cid in created_ids]
+                )
 
                 return routes.make_response(
                     data={
                         "status": "success",
                         "line_count": len(created_ids),
                         "line_ids": created_ids,
+                        "tx_status": tx_status,
+                        "tx_ok": tx_ok,
+                        "verified": verified,
                         "message": "Created {} room separation line{}".format(
                             len(created_ids),
                             "s" if len(created_ids) != 1 else ""

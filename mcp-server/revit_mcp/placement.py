@@ -4,7 +4,7 @@ Placement Module for Revit MCP
 Handles family placement and element creation functionality
 """
 
-from utils import get_element_name, find_family_symbol_safely, get_element_id_value, suppress_warnings, repair_hebrew_in
+from utils import get_element_name, find_family_symbol_safely, get_element_id_value, suppress_warnings, repair_hebrew_in, commit_verified
 from pyrevit import routes, revit, DB
 import json
 import os
@@ -12,6 +12,15 @@ import traceback
 import logging
 
 logger = logging.getLogger(__name__)
+
+# Provisional - see docs/operation-contracts.md. Looser than transforms.py's
+# LOCATION_TOLERANCE_FT (1e-6 ft) on purpose: placement snaps to family/host
+# constraints in ways a rigid-body move does not, so a tight geometric
+# tolerance would false-positive on legitimate snapping. 10mm is chosen to
+# still catch the two measured historical bugs this exists for - the
+# insertion-point offset (hundreds of mm) and the elevation-doubling
+# (a full floor-to-floor height) - while tolerating minor Revit-side snap.
+PLACEMENT_TOLERANCE_FT = 10.0 / 304.8
 
 
 def register_placement_routes(api):
@@ -340,26 +349,77 @@ def register_placement_routes(api):
                             "{} (error: {})".format(param_name, str(param_error))
                         )
 
-                t.Commit()
+                tx_ok, tx_status = commit_verified(t)
+                if not tx_ok:
+                    return routes.make_response(
+                        data={
+                            "status": "error",
+                            "family_name": family_name,
+                            "type_name": type_name,
+                            "tx_status": tx_status,
+                            "tx_ok": tx_ok,
+                            "error": "Transaction did not commit (tx_status={}) - no instance was placed.".format(tx_status),
+                        },
+                        status=500,
+                    )
                 logger.info("Transaction committed successfully")
 
                 # Get actual placed location (may differ due to level constraints).
                 # Report in millimeters to match the input units.
                 FEET_TO_MM = 304.8
+                new_id = get_element_id_value(new_instance)
+                elem_after = doc.GetElement(DB.ElementId(new_id))
                 try:
-                    actual_location = new_instance.Location.Point
+                    actual_location = elem_after.Location.Point
                     actual_coords = {
                         "x": actual_location.X * FEET_TO_MM,
                         "y": actual_location.Y * FEET_TO_MM,
                         "z": actual_location.Z * FEET_TO_MM,
                     }
                 except:
+                    actual_location = None
                     actual_coords = {"x": point.X * FEET_TO_MM, "y": point.Y * FEET_TO_MM, "z": point.Z * FEET_TO_MM}
+
+                # Level 2: does the instance resolve, and is its location
+                # what was actually requested? Both measured historical bugs
+                # (insertion point at the family's back, elevation added
+                # twice/stuck at Z=0) pass a naive "was it created?" check -
+                # only comparing location catches them. Host-hosted
+                # instances (windows/doors) legitimately have X/Y projected
+                # onto the wall's constraint, so only Z is checked there;
+                # Z is not affected by that projection and is exactly the
+                # axis both historical elevation bugs live on.
+                if elem_after is None:
+                    verified = {"ok": False, "method": "element_exists", "reason": "New instance does not resolve after commit"}
+                elif actual_location is None:
+                    verified = {"ok": None, "status": "not_checked", "reason": "Instance has no LocationPoint to compare"}
+                else:
+                    dz = abs(actual_location.Z - point.Z)
+                    if host_wall is not None:
+                        verified = {
+                            "ok": dz <= PLACEMENT_TOLERANCE_FT,
+                            "method": "location_z_only",
+                            "expected": {"z_mm": point.Z * FEET_TO_MM},
+                            "actual": {"z_mm": actual_location.Z * FEET_TO_MM},
+                            "reason": "X/Y not checked - wall-hosted instances legitimately project onto the host wall",
+                        }
+                    else:
+                        dx = abs(actual_location.X - point.X)
+                        dy = abs(actual_location.Y - point.Y)
+                        ok = dx <= PLACEMENT_TOLERANCE_FT and dy <= PLACEMENT_TOLERANCE_FT and dz <= PLACEMENT_TOLERANCE_FT
+                        verified = {
+                            "ok": ok,
+                            "method": "location_point",
+                            "expected": {"x_mm": point.X * FEET_TO_MM, "y_mm": point.Y * FEET_TO_MM, "z_mm": point.Z * FEET_TO_MM},
+                            "actual": actual_coords,
+                        }
+                        if not ok:
+                            verified["reason"] = "actual location does not match requested location within {:.1f}mm".format(PLACEMENT_TOLERANCE_FT * FEET_TO_MM)
 
                 # Return information about the placed instance
                 response_data = {
                     "status": "success",
-                    "element_id": get_element_id_value(new_instance),
+                    "element_id": new_id,
                     "family_name": family_name,
                     "type_name": type_name,
                     "requested_location": {"x": point.X * FEET_TO_MM, "y": point.Y * FEET_TO_MM, "z": point.Z * FEET_TO_MM},
@@ -368,6 +428,9 @@ def register_placement_routes(api):
                     "level": level_name if target_level else None,
                     "properties_set": properties_set,
                     "properties_failed": properties_failed,
+                    "tx_status": tx_status,
+                    "tx_ok": tx_ok,
+                    "verified": verified,
                 }
 
                 return routes.make_response(data=response_data)

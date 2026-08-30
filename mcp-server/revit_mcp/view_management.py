@@ -4,7 +4,7 @@ View Management Module for Revit MCP
 Handles view creation and active view switching
 """
 
-from utils import get_element_name, get_element_id_value, suppress_warnings, repair_hebrew_in
+from utils import get_element_name, get_element_id_value, suppress_warnings, repair_hebrew_in, commit_verified
 from pyrevit import routes, revit, DB
 import json
 import traceback
@@ -274,20 +274,56 @@ def register_view_management_routes(api):
                 if new_view:
                     new_view.Name = name
 
-                t.Commit()
+                tx_ok, tx_status = commit_verified(t)
+                if not tx_ok:
+                    return routes.make_response(
+                        data={
+                            "status": "error",
+                            "tx_status": tx_status,
+                            "tx_ok": tx_ok,
+                            "error": "Transaction did not commit (tx_status={}) - no view was created.".format(tx_status),
+                        },
+                        status=500,
+                    )
 
+                view_id = get_element_id_value(new_view)
+                view_after = doc.GetElement(DB.ElementId(view_id))
                 actual_type = ""
                 try:
                     actual_type = str(new_view.ViewType)
                 except Exception:
                     actual_type = view_type
 
+                # Level 2: the view must resolve AND actually carry the name
+                # that was requested - Name is a plain string setter with no
+                # documented uniqueness/rejection path here, but re-reading
+                # rather than assuming is the whole point of this milestone.
+                actual_name = ""
+                name_matches = None
+                if view_after is not None:
+                    try:
+                        actual_name = get_element_name(view_after)
+                        name_matches = (actual_name == name)
+                    except Exception:
+                        pass
+                verified = {
+                    "ok": (view_after is not None) and bool(name_matches),
+                    "method": "element_exists_and_name",
+                    "expected": {"name": name},
+                    "actual": {"name": actual_name, "resolves": view_after is not None},
+                }
+                if not verified["ok"]:
+                    verified["reason"] = "View does not resolve or its name does not match what was requested"
+
                 return routes.make_response(
                     data={
                         "status": "success",
-                        "view_id": get_element_id_value(new_view),
+                        "view_id": view_id,
                         "name": name,
                         "view_type": actual_type,
+                        "tx_status": tx_status,
+                        "tx_ok": tx_ok,
+                        "verified": verified,
                         "message": "Created {} view '{}'".format(view_type, name),
                     }
                 )

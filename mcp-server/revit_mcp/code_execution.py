@@ -4,7 +4,7 @@ Code Execution Module for Revit MCP
 Handles direct execution of IronPython code in Revit context.
 """
 from pyrevit import routes, revit, DB
-from utils import suppress_warnings, repair_hebrew_in
+from utils import suppress_warnings, repair_hebrew_in, commit_verified
 import json
 import logging
 import sys
@@ -99,9 +99,29 @@ def register_code_execution_routes(api):
                 output = captured_output.getvalue()
                 captured_output.close()
 
-                # Commit the transaction (absent when the caller opted out)
-                if t is not None:
-                    t.Commit()
+                # Commit the transaction (absent when the caller opted out).
+                # Level 1 only - the "operation" here is arbitrary submitted
+                # code with no fixed contract, so a generic level-2
+                # post-condition cannot be defined; not_checked is the
+                # honest, structural answer for this endpoint, not a gap.
+                #
+                # tx_ok is tri-state: True/False for a real transaction,
+                # None for #!notx (t is None). Check "is False" specifically -
+                # "not tx_ok" would also catch None and wrongly fail every
+                # #!notx call, which by design never has a transaction to
+                # verify at all.
+                tx_ok, tx_status = commit_verified(t)
+                if tx_ok is False:
+                    return routes.make_response(
+                        data={
+                            "status": "error",
+                            "tx_status": tx_status,
+                            "tx_ok": tx_ok,
+                            "output": output,
+                            "error": "Transaction did not commit (tx_status={}) - the model is unchanged, even though the code ran without raising.".format(tx_status),
+                        },
+                        status=500,
+                    )
 
                 return routes.make_response(
                     data={
@@ -113,6 +133,13 @@ def register_code_execution_routes(api):
                             else "Code executed successfully (no output)"
                         ),
                         "code_executed": code_to_execute,
+                        "tx_status": tx_status,
+                        "tx_ok": tx_ok,
+                        "verified": {
+                            "ok": None,
+                            "status": "not_checked",
+                            "reason": "execute_revit_code runs arbitrary submitted code with no fixed contract - only transaction-level verification (tx_status) applies here.",
+                        },
                     }
                 )
 
