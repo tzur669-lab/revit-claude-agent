@@ -119,12 +119,37 @@ do not wait for the scribe's queue. Load `references/lessons.md` and write
 directly, at that moment in the conversation. The gate, the line format, and the
 lock are all there.
 
+## Design-state claims — a goal, constraint, decision, or open question
+
+A project goal, a constraint the user states, a decision reached, or an open
+question worth tracking — none of this needs a model change to be worth
+recording, and `checkpoint-queue.md`'s own rule forbids a journal item with an
+all-zero diff. This is what `design_state.json` is for instead — see
+`references/project-log-format.md` for the schema.
+
+**Propose it, hand it to the scribe, do not write the file yourself.** Same
+writer discipline as `journal.ndjson`/`state.json` — the scribe is the sole
+writer, via the queue or a direct message, under `.scribe.lock`.
+
+**Do not invent one on your own initiative.** A design-state record represents
+what the user actually said or decided, or something directly measured from
+the model (`source: "measured"`) — not a preference you inferred and never
+confirmed. When genuinely inferring something (`source: "inferred"`), say so
+explicitly in the claim and expect it to be checked, not treated as settled.
+
+**A project-specific constraint stays project-specific.** Unlike a
+`RULES.md` lesson (global, cross-project, only after the user's gate),
+`design_state.json` lives inside `instance_dir` — a constraint recorded here
+never crosses into another project by design. If it later turns out to be a
+general Revit/tracker lesson, it still belongs in `RULES.md`, not here — see
+`references/lessons.md` for that distinction.
+
 ## File ownership — never write past the line
 
 | Owner | Files |
 |---|---|
 | Revit side (`tracker.py`) | `snapshot.tsv`, `snapshot.hdr.json`, `events.ndjson`, `deltas/`, `_index.json`, `.lock` |
-| `revit-scribe` only | `journal.ndjson`, `state.json`, `log/`, `.scribe.lock` |
+| `revit-scribe` only | `journal.ndjson`, `state.json`, `design_state.json`, `log/`, `.scribe.lock` |
 | The main thread | `writeups/pending/` (creation), `README.md`, `RULES.md` (only after a user correction/approval) |
 
 A single writer per file is what prevents collisions between the processes.

@@ -216,8 +216,29 @@ only because cross-checking against the delta is mandatory, not a sanity check.
 | Owner | Files |
 |---|---|
 | `tracker.py` (Revit side) | `snapshot.tsv` · `events.ndjson` · `deltas/` · `_index.json` · `.lock` |
-| `revit-scribe` only | `journal.ndjson` · `state.json` · `log/` · `.scribe.lock` |
+| `revit-scribe` only | `journal.ndjson` · `state.json` · `design_state.json` · `log/` · `.scribe.lock` |
 | The main thread | `writeups/pending/` (creation) · `README.md` · `RULES.md` (only after user approval) |
+
+### Five kinds of memory, five physical homes
+
+Not all memory in this system is the same kind of thing, and conflating them
+was never forced by the file layout — each already sits somewhere distinct:
+
+| Memory | What it holds | Physical home |
+|---|---|---|
+| **Model** | elements, geometry, parameters, relationships — what exists *right now* | never persisted as its own store; read live via `mcp__revit__` (`get_element_properties`, `analyze_relationships`, ...) or reconstructed from `snapshot.tsv` |
+| **Project** | history — previous changes, decisions, failures, alternatives | `journal.ndjson` (append-only events) · `state.json` (current-state rollup) |
+| **Intent** | what the user is trying to accomplish — goals, priorities | `design_state.json`, `kind: "goal"`/`"preference"` records (Milestone 5) |
+| **Constraint** | rules and limits — code, client requirements, site/structural/MEP limits | project-scoped: `design_state.json`, `kind: "constraint"` records. Cross-project/general: `revit-lessons/RULES.md`'s `check` field |
+| **Learned design** | reusable knowledge from a user correction or approval | `revit-lessons/RULES.md` — see below |
+
+`design_state.json` is new (Milestone 5 of the M1-M5 architecture upgrade,
+`memory-system/claude/skills/revit-session/references/project-log-format.md`
+has the full schema) — it exists specifically because Project memory
+(`journal.ndjson`) cannot represent Intent or Constraint memory: a queue item
+requires a non-empty diff (`checkpoint-queue.md`'s own rule), so a goal
+stated or a constraint agreed with no model change was, until this
+milestone, structurally unrecordable.
 
 ### Global cross-project lessons board
 

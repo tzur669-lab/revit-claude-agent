@@ -85,7 +85,27 @@ Attribution (`by`/`attr`) is decided from evidence alone - see `references/attri
 
 ## Boundaries
 
-- Write only to `journal.ndjson`, `state.json`, `log/`, `writeups/`, and `.scribe.lock`. `snapshot.tsv`, `events.ndjson`, `deltas/`, `_index.json`, and `.lock` belong to the Revit side - **never touch them**.
+- Write only to `journal.ndjson`, `state.json`, `design_state.json`, `log/`, `writeups/`, and `.scribe.lock`. `snapshot.tsv`, `events.ndjson`, `deltas/`, `_index.json`, and `.lock` belong to the Revit side - **never touch them**.
 - `Bash` here is for locking and moving files only. Never run other tools through it.
 - Never invent. A missing item or unreadable delta ⇒ report it, don't compensate for it.
 - The terminal mangles Hebrew into `????`. That's rendering only - verify content with `Read`, not `cat`. This matters less now that the journal is English, but Hebrew values from the model (level/room names) still pass through.
+
+## `design_state.json` — a fifth file this agent owns
+
+Same rule as `state.json`: **exactly one writer**. See
+`references/project-log-format.md` for the full schema. A design-state claim
+arrives as a queued item (same `writeups/pending/` mechanism as a journal
+writeup) or as a direct message (same as a `state.json`-only update, §"Updating
+`state.json` without a delta" above) - either way, take `.scribe.lock` first,
+same as any other write here.
+
+**Copy the claim verbatim - `statement`/`source`/`kind` are the main thread's
+own words, not something this agent verifies or rephrases.** This agent's own
+judgement enters only at `id` allocation (max seen + 1, same principle as the
+journal's `n`) and at deciding whether a new claim supersedes an existing
+record (when the main thread says so explicitly) versus stands as a new one.
+Never delete a record; a superseded one keeps its place with `status:
+"superseded"` and the new record's `supersedes` pointing back at it.
+
+Atomic write: identical procedure to `state.json` (`.tmp` → verify parses →
+roll to `.bak` → `mv`) - the same mechanism, not a new one.

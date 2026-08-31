@@ -107,6 +107,58 @@ def _load_rules(rules_path):
         return None, "Rules file at {} could not be parsed: {}".format(rules_path, str(e))
 
 
+def _merge_extra_rules(base_room_types, extra_rules):
+    """Merge a request-scoped extra_rules body field over the loaded rules
+    file's room_types, by "id": an id present in both is overridden by
+    extra_rules' version; an id only in extra_rules is added; an id only in
+    base_room_types is kept unchanged.
+
+    Vertical slice for the M1-M5 architecture upgrade's design-state work
+    (Milestone 5): lets a project-specific constraint (recorded, say, in
+    that project's design_state.json) be checked per call with no
+    file-path plumbing - and, just as important, with NO jurisdiction data
+    of any kind added to this repo. extra_rules carries only whatever
+    numbers the CALLER supplies at request time.
+
+    Returns a NEW list. NEVER mutates base_room_types or extra_rules -
+    accidentally mutating the shared, module-level rules dict this
+    request's caller loaded would leak into a later, unrelated request
+    that never asked for extra_rules at all. extra_rules is entirely
+    request-scoped: nothing here writes it to disk, ever.
+
+    extra_rules must be shaped {"room_types": [...]} - the same shape as
+    the rules file itself. A missing/malformed extra_rules (not a dict, no
+    "room_types" list, or empty) degrades to "no extra rules applied"
+    rather than raising - this is an optional, best-effort convenience,
+    not a required part of the request. An entry in either list with no
+    "id" is skipped (nothing to merge it by). Two entries with the same id
+    WITHIN extra_rules itself: the later one in the list wins, matching
+    ordinary dict-overwrite semantics - deterministic, not an error."""
+    merged = list(base_room_types)
+    if not isinstance(extra_rules, dict):
+        return merged
+    extra_types = extra_rules.get("room_types")
+    if not isinstance(extra_types, list) or not extra_types:
+        return merged
+
+    by_id = {}
+    order = []
+    for rt in merged:
+        rid = rt.get("id") if isinstance(rt, dict) else None
+        if rid is None:
+            continue
+        by_id[rid] = rt
+        order.append(rid)
+    for rt in extra_types:
+        rid = rt.get("id") if isinstance(rt, dict) else None
+        if rid is None:
+            continue
+        if rid not in by_id:
+            order.append(rid)
+        by_id[rid] = rt
+    return [by_id[rid] for rid in order]
+
+
 def _match_room_type(name, room_types):
     """Case-insensitive substring match. Hebrew has no case distinction, so
     .lower() is a no-op there; for a Latin-script rules file (English,
@@ -306,6 +358,7 @@ def register_validation_routes(api):
 
             rules_path = data.get("rules_path") or DEFAULT_RULES_PATH
             room_ids = data.get("room_ids")
+            extra_rules = data.get("extra_rules")
 
             rules, err = _load_rules(rules_path)
             if err:
@@ -318,7 +371,10 @@ def register_validation_routes(api):
                     status=404,
                 )
 
-            room_types = rules.get("room_types", [])
+            # extra_rules is request-scoped only - merged into a NEW list,
+            # never written back into `rules` (the loaded rules-file dict)
+            # or to disk. See _merge_extra_rules's own docstring.
+            room_types = _merge_extra_rules(rules.get("room_types", []), extra_rules)
 
             if room_ids:
                 rooms = []
@@ -383,6 +439,7 @@ def register_validation_routes(api):
                 "status": "success",
                 "rules_source": rules.get("source"),
                 "rules_path": rules_path,
+                "extra_rules_applied": bool(extra_rules),
                 "results": results,
                 "not_found": not_found,
                 "violation_count": violation_count,

@@ -50,6 +50,7 @@ From the chosen `instance_dir`:
 1. `state.json` - the current state snapshot. If present, this is the most important source. `state.json` fails to parse ⇒ fall back to `state.json.bak` and say so explicitly in the briefing.
 2. `journal.ndjson` - **the last 3 lines only** (`tail -n 3`), for what happened most recently. A line at the end that fails to parse is a truncated write - skip it and use the last valid one.
 3. `events.ndjson` - the last `20` lines, to identify the most recent activity.
+4. `design_state.json`, if present - only its `active` records (`status: "active"`). Not every field: `kind` + `statement` is enough for a briefing line. Missing entirely ⇒ say nothing about it, that is not a failure - most projects will not have one yet.
 
 If only `legacy/PROJECT.md` and `legacy/STATE.md` exist (pre-migration project, or migration not yet run) - read those instead, using the same targeted approach: `STATE.md` in full, `PROJECT.md` only the last dated section. Say explicitly that this project is still on the legacy format.
 
@@ -66,11 +67,12 @@ Up to 15 lines. English. Any literal identifier or path in backticks.
 **Recently done:** 2-4 lines from the last journal records.
 **Open threads:** what's left mid-way, if any. If none - "none".
 **Known traps:** only ones recorded in this file and relevant to what's next.
+**Design state:** active goals/constraints, if design_state.json exists. Omit this line entirely when it doesn't.
 ```
 
 The two header lines are **mandatory** - the main thread cross-checks them against the tracker and discards the briefing if they don't match.
 
-**The cap is enforced.** `Recently done` - up to `4` lines. `Open threads` and `Known traps` - **one line each**, the most relevant to what comes next. Everything else is already written to `journal.ndjson`/`state.json` and the main thread can read it when needed. A briefing that copies the file defeats the reason it exists.
+**The cap is enforced.** `Recently done` - up to `4` lines. `Open threads`, `Known traps`, and `Design state` - **one line each**, the most relevant to what comes next (design state: pick the 2-3 active records most likely to matter, not every one). Everything else is already written to `journal.ndjson`/`state.json`/`design_state.json` and the main thread can read it when needed. A briefing that copies the file defeats the reason it exists.
 
 ## Boundaries
 

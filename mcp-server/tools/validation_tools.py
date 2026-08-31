@@ -13,6 +13,7 @@ def register_validation_tools(mcp, revit_get, revit_post, revit_image=None):
     async def validate_design(
         room_ids: list[int] = None,
         rules_path: str = None,
+        extra_rules: dict = None,
         ctx: Context = None,
     ) -> str:
         """Check rooms against external design standards (read-only).
@@ -39,11 +40,15 @@ def register_validation_tools(mcp, revit_get, revit_post, revit_image=None):
         Args:
             room_ids: Specific room element ids to check (defaults to every room in the model)
             rules_path: Override path to the rules JSON file (defaults to a per-user path)
+            extra_rules: Optional, request-scoped room_types to merge over the rules file by
+                "id" (same shape: {"room_types": [...]}) — e.g. a project-specific constraint.
+                Never written to disk or to the rules file; applies to this call only.
             ctx: MCP context for logging
         """
         data = {
             "room_ids": room_ids,
             "rules_path": rules_path,
+            "extra_rules": extra_rules,
         }
         response = await revit_post("/validate_design/", data, ctx)
         return format_response(response)

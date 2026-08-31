@@ -453,6 +453,16 @@ method : per-room checks against an external, private, locale-supplied rules
              code names or assumes which room type this applies to
 tol    : n/a - each rule's own threshold, read from the rules file, not
          hardcoded in this engine
+extra  : optional `extra_rules` body field (Milestone 5 of the M1-M5
+         architecture upgrade) - {"room_types": [...]}, same shape as the
+         rules file, merged over it by "id" (an id in both: extra_rules
+         wins; an id only in extra_rules: added; see
+         revit_mcp/validation.py::_merge_extra_rules). Request-scoped only
+         - never written to disk, never mutates the loaded rules object,
+         does not leak between calls. Lets a project-specific constraint
+         (e.g. one recorded in that project's design_state.json) be
+         checked per call with no file-path plumbing, still with NO
+         jurisdiction data of any kind in this repo.
 limits : ROOM WIDTH, window-area-vs-floor-area rules, and the kitchen
          work-triangle are NOT checked - explicit not_checked findings, not
          silent gaps. "Unbounded Height" approximates but is not

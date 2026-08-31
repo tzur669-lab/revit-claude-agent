@@ -201,6 +201,92 @@ The reading side: `state.json` does not parse ⇒ fall back to `state.json.bak`
 
 ---
 
+## `design_state.json`
+
+Current design reasoning for this project — goals, constraints, assumptions,
+decisions, open questions, preferences. **Not** a replacement for
+`journal.ndjson`/`state.json`/deltas/snapshots — those stay the record of
+what changed and what exists; this is the record of what the project is
+*trying to achieve* and *why*, which can exist with no diff at all (rejecting
+an option, agreeing a strategy) — exactly the case `checkpoint-queue.md`'s
+own rule excludes from ever reaching the journal.
+
+**Exactly one writer: the scribe.** Same rule, same reason, as
+`journal.ndjson`/`state.json` — a single writer per file is what prevents
+collisions between the tracker (Revit side) and the agents (disk side). No
+Revit route, no MCP tool, no `revit-historian`, may write this file. The main
+thread proposes a record (a claim); the scribe is the one that actually
+writes it, under `.scribe.lock`, using the **same** atomic procedure as
+`state.json` — write `.tmp`, verify it parses, roll the existing file to
+`.bak`, `mv`. This is a direct reuse of that existing mechanism, not a new
+one.
+
+```json
+{"v":1,"updated":"2026-08-31T18:00","records":[
+  {"id":"D001","kind":"constraint","scope":"project",
+   "statement":"preserve the central core; do not touch stair/elevator/shaft footprint",
+   "source":"user","status":"active","check":null,"evidence":null,
+   "tags":["core","circulation"],"created":"2026-08-31T18:00","supersedes":null}
+]}
+```
+
+| Field | Values | Note |
+|---|---|---|
+| `id` | `D001`, `D002`, ... | monotonic, derived the same way the journal derives `n` — from the max id already present, never from a count. Never reused, even after a record is superseded or its status changes. |
+| `kind` | `goal` \| `constraint` \| `assumption` \| `decision` \| `question` \| `preference` | what TYPE of thing this record is |
+| `scope` | `project` (only value in use today) | reserved for a future non-project scope; do not invent one without a real need |
+| `statement` | free text | the claim itself, one or a few sentences |
+| `source` | `user` \| `measured` \| `inferred` | where this claim came from |
+| `status` | `active` \| `resolved` \| `rejected` \| `superseded` | current standing |
+| `check` | free text or `null` | an operational test, when one exists — same spirit as a `RULES.md` line's `check` field |
+| `evidence` | free text/pointer or `null` | optional support for the claim |
+| `tags` | list of free-text strings | for lookup; not a closed vocabulary like `RULES.md`'s trigger domains |
+| `created` | ISO timestamp | when the record was written |
+| `supersedes` | an earlier record's `id`, or `null` | see below |
+
+### `kind` × `source` is the fact/rule/intent/judgement separation
+
+No second field for this — the two already on the record say it:
+
+| `source: measured` | `source: user` | `kind: goal`/`preference` | `source: inferred` |
+|---|---|---|---|
+| **fact** | **rule** (when `kind: constraint`) | **intent** | **judgement** |
+
+A record the system itself derived from the model (`source: measured`) is a
+fact. A constraint the user stated (`kind: constraint, source: user`) is a
+rule. A goal or preference is intent, regardless of source. Anything the
+system concluded on its own (`source: inferred`) is judgement, and must be
+distinguishable from a fact a human can check directly. Do not invent a
+`confidence` field or any other axis for this distinction — these two fields
+already carry it.
+
+### Superseding a record — never delete
+
+A record that no longer holds is **not** deleted. Its own `status` becomes
+`superseded`, it stays in `records` exactly as written, and the **new**
+record points back at it via `supersedes`. Historical design reasoning stays
+available, the same way the journal never deletes a past entry.
+
+### Ownership, precisely
+
+```
+main thread proposes a design-state claim
+      ↓  scribe receives it (queued, like a journal writeup, or as a
+      ↓  direct message — see "Updating state.json without a delta"
+      ↓  in agents/revit-scribe.md, the same mechanism applies here)
+      ↓  scribe takes .scribe.lock
+      ↓  scribe writes design_state.json.tmp → verifies it parses →
+      ↓  rolls the existing file to .bak → mv
+      ↓  scribe releases the lock
+```
+
+`expected`/`verified`/`outcome` in the journal (see above) are a related but
+separate idea: those are per-*change* claims about one batch of work.
+`design_state.json` is the project's standing claims, independent of any
+single change.
+
+---
+
 ## Rotation
 
 `journal.ndjson` past `~150KB` or `~200` records ⇒ move records older than `30`
