@@ -48,9 +48,9 @@ between versions, auto-detected at runtime — no manual configuration.
 |---|---|---|
 | 15 | Creation | `create_level` · `place_family` · `create_room` · `create_duct` |
 | 12 | Query | `list_levels` · `get_element_properties` · `get_revit_view` |
-| 8 | Editing | `modify_element` · `transform_elements` · `tag_elements` |
+| 9 | Editing | `modify_element` · `transform_elements` · `tag_elements` |
 | 8 | Analysis | `check_clashes` · `analyze_model_statistics` · `analyze_relationships` · `preview_delete_impact` · `validate_design` |
-| 3 | Documentation | `create_dimensions` · `export_document` |
+| 2 | Documentation | `create_dimensions` · `export_document` |
 | 4 | Interop and save | `export_ifc` · `link_file` · `save_document` |
 | 1 | Advanced | `execute_revit_code` — run arbitrary IronPython inside Revit |
 

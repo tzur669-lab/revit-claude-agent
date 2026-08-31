@@ -5,14 +5,63 @@ Handles direct execution of IronPython code in Revit context.
 """
 from pyrevit import routes, revit, DB
 from utils import suppress_warnings, repair_hebrew_in, commit_verified
+from code_safety import classify
+import io
 import json
 import logging
+import os
 import sys
+import time
 import traceback
 from StringIO import StringIO
 
 # Standard logger setup
 logger = logging.getLogger(__name__)
+
+# Best-effort, append-only audit trail of every execute_revit_code
+# submission - see _write_audit_record's own docstring. Deliberately its
+# own file/directory, sharing no lock with the tracker (.lock), the scribe
+# (.scribe.lock), or the lessons file (.lessons.lock) - none of those
+# protect this file and this file protects none of theirs.
+_AUDIT_DIR = os.path.join(os.path.expanduser("~"), ".claude", "revit-tracker", "audit")
+
+
+def _write_audit_record(record):
+    """Append one JSON line to this month's audit file. NEVER allowed to
+    affect execution: any failure here (directory creation, a full disk,
+    a permission error, a value that doesn't serialize) is caught and
+    silently swallowed. A logging failure must never roll back the
+    transaction, never raise to the MCP caller, and never turn a
+    successful execution into an error - that guarantee is the entire
+    point of keeping this as a small, separate, best-effort function
+    rather than folding it into the main try/except above."""
+    try:
+        if not os.path.isdir(_AUDIT_DIR):
+            os.makedirs(_AUDIT_DIR)
+        path = os.path.join(_AUDIT_DIR, "code-{}.ndjson".format(time.strftime("%Y-%m")))
+        line = json.dumps(record, ensure_ascii=False)
+        with io.open(path, "a", encoding="utf-8") as f:
+            f.write(line)
+            f.write(u"\n")
+    except Exception:
+        pass
+
+
+def _audit_safe(record):
+    """Call _write_audit_record with a second, outer safety net around the
+    call site itself - not just inside that function's own body. Belt and
+    suspenders deliberately: _write_audit_record's internal try/except
+    covers its own normal failure modes (disk full, permission denied, a
+    value that won't serialize) cheaply, but the guarantee this milestone
+    requires is unconditional - "for any reason" - and a call site with no
+    guard of its own would still propagate if _write_audit_record itself
+    were ever broken, replaced, or extended in a way that steps outside
+    its own try/except. This is what every one of the three call sites
+    below actually calls."""
+    try:
+        _write_audit_record(record)
+    except Exception:
+        pass
 
 
 def register_code_execution_routes(api):
@@ -50,6 +99,13 @@ def register_code_execution_routes(api):
                 )
 
             logger.info("Executing code: {}".format(description))
+
+            # Advisory classification only - see code_safety.py's own
+            # docstring. classify() NEVER blocks execution; risk/signals
+            # are metadata attached to the response and the audit record,
+            # nothing more.
+            risk, risk_signals = classify(code_to_execute)
+            submitted_at = time.strftime("%Y-%m-%dT%H:%M:%S")
 
             # Code whose first line is "#!notx" runs with no wrapping
             # transaction and manages its own. Revit's edit scopes
@@ -112,17 +168,31 @@ def register_code_execution_routes(api):
                 # verify at all.
                 tx_ok, tx_status = commit_verified(t)
                 if tx_ok is False:
+                    _audit_safe({
+                        "at": submitted_at, "description": description,
+                        "code": code_to_execute, "risk": risk, "risk_signals": risk_signals,
+                        "tx_status": tx_status, "tx_ok": tx_ok,
+                        "outcome": "tx_not_committed",
+                    })
                     return routes.make_response(
                         data={
                             "status": "error",
                             "tx_status": tx_status,
                             "tx_ok": tx_ok,
                             "output": output,
+                            "risk": risk,
+                            "risk_signals": risk_signals,
                             "error": "Transaction did not commit (tx_status={}) - the model is unchanged, even though the code ran without raising.".format(tx_status),
                         },
                         status=500,
                     )
 
+                _audit_safe({
+                    "at": submitted_at, "description": description,
+                    "code": code_to_execute, "risk": risk, "risk_signals": risk_signals,
+                    "tx_status": tx_status, "tx_ok": tx_ok,
+                    "outcome": "success",
+                })
                 return routes.make_response(
                     data={
                         "status": "success",
@@ -135,6 +205,8 @@ def register_code_execution_routes(api):
                         "code_executed": code_to_execute,
                         "tx_status": tx_status,
                         "tx_ok": tx_ok,
+                        "risk": risk,
+                        "risk_signals": risk_signals,
                         "verified": {
                             "ok": None,
                             "status": "not_checked",
@@ -202,6 +274,8 @@ def register_code_execution_routes(api):
                     "error_type": error_type,
                     "traceback": error_traceback,
                     "code_attempted": code_to_execute,
+                    "risk": risk,
+                    "risk_signals": risk_signals,
                 }
 
                 if partial_output:
@@ -210,6 +284,11 @@ def register_code_execution_routes(api):
                 if hints:
                     response_data["hints"] = hints
 
+                _audit_safe({
+                    "at": submitted_at, "description": description,
+                    "code": code_to_execute, "risk": risk, "risk_signals": risk_signals,
+                    "outcome": "exception", "error": enhanced_message,
+                })
                 return routes.make_response(
                     data=response_data,
                     status=500,

@@ -314,6 +314,30 @@ reason : this endpoint runs arbitrary submitted code with no fixed
          (session_start/checkpoint) runs through on every call.
 ```
 
+**Risk classification (`code_safety.py`) — advisory, not a gate.** Every
+submission is classified `read`/`modify`/`destructive`/`unknown` by a static
+AST scan (`revit_mcp/code_safety.py::classify`) before execution, and the
+result (`risk`, `risk_signals`) is returned alongside the normal response on
+every path — success, transaction failure, and exception. **Classification
+never blocks execution**, on any risk level, including `unknown` (an
+unparseable submission) — it is observability metadata, not a sandbox or a
+security boundary, and does not claim to detect every dangerous operation a
+piece of Python can perform. See `code_safety.py`'s own module docstring for
+what is and is not detected.
+
+**Audit trail — best-effort, append-only.** Every submission (all three
+outcomes) is logged to `~/.claude/revit-tracker/audit/code-YYYY-MM.ndjson`:
+timestamp, description, the **exact submitted source** (never normalized,
+dedented, or truncated), `risk`/`risk_signals`, `tx_status`/`tx_ok` where
+applicable, and the outcome. This file shares no lock with the tracker
+(`.lock`), the scribe (`.scribe.lock`), or the lessons file
+(`.lessons.lock`) — it is a separate, independent write path. A failure to
+write the audit record (disk full, permission denied, an unserializable
+value) is caught at two layers (inside the writer, and again at each call
+site) and can never change the execution result, roll back the transaction,
+or turn a successful run into an error. No automatic rotation/deletion of
+audit history exists.
+
 ### `save_document` (`document.py`)
 
 Not a `DB.Transaction` operation at all — `Save()`/`SaveAs()` are void calls with

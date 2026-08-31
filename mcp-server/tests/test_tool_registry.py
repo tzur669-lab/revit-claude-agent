@@ -292,6 +292,51 @@ def test_architecture_md_category_table_sums_to_the_derived_total():
     )
 
 
+_ARCHITECTURE_MD_CATEGORY_NAMES = {
+    "creation": "Creation", "query": "Query", "editing": "Editing",
+    "analysis": "Analysis", "documentation": "Documentation",
+    "interop": "Interop and save", "advanced": "Advanced",
+}
+
+
+def test_architecture_md_category_table_rows_match_individually():
+    """A stronger check than the sum test above: two rows can be
+    individually wrong (one over, one under) and still sum correctly - this
+    project measured exactly that once (Editing claimed 8 instead of 9,
+    Documentation claimed 3 instead of 2, and the total of 51 stayed
+    accidentally correct throughout). Checks every row's own count against
+    registry.py's actual per-category tally, by name, not just the total."""
+    from collections import Counter
+    real_counts = Counter(v["category"] for v in TOOLS.values())
+
+    text = _read("docs", "architecture.md")
+    rows = re.findall(r"^\|\s*(\d+)\s*\|\s*([A-Za-z ]+?)\s*\|", text, re.MULTILINE)
+    assert rows, "no category-count table rows matched in docs/architecture.md"
+
+    name_to_id = {v: k for k, v in _ARCHITECTURE_MD_CATEGORY_NAMES.items()}
+    mismatches = []
+    seen_ids = set()
+    for claimed_count, name in rows:
+        cat_id = name_to_id.get(name.strip())
+        assert cat_id is not None, (
+            "docs/architecture.md table has a category name %r not in "
+            "_ARCHITECTURE_MD_CATEGORY_NAMES - add it there" % name
+        )
+        seen_ids.add(cat_id)
+        if int(claimed_count) != real_counts[cat_id]:
+            mismatches.append((name, int(claimed_count), real_counts[cat_id]))
+
+    assert seen_ids == set(real_counts.keys()), (
+        "docs/architecture.md's table categories %r do not match "
+        "registry.py's actual categories %r" % (seen_ids, set(real_counts.keys()))
+    )
+    assert not mismatches, (
+        "docs/architecture.md category row(s) whose claimed count does not "
+        "match registry.py's actual per-category count "
+        "(name, claimed, actual): %r" % mismatches
+    )
+
+
 _WORD_NUMBERS = {
     "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
     "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
