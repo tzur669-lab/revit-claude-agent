@@ -138,7 +138,25 @@ async def _revit_call(method: str, endpoint: str, data: Dict = None, ctx: Contex
                 timeout=timeout,
             )
 
-        return response.json() if response.status_code == 200 else f"Error: {response.status_code} - {response.text}"
+        if response.status_code == 200:
+            return response.json()
+
+        # Non-200: the handler's structured error payload (error / traceback /
+        # tx_status / hints) is valuable and format_response can render it
+        # properly - but only when the body actually parses as a JSON object.
+        # A body that doesn't (a proxy's HTML error page, a truncated read)
+        # falls back to the original plain-text error, unchanged. _http_status
+        # is stamped on so format_response can never mistake this dict for a
+        # success, even if a "status": "success"-shaped body were nested
+        # inside it.
+        try:
+            parsed = response.json()
+        except Exception:
+            return f"Error: {response.status_code} - {response.text}"
+        if isinstance(parsed, dict):
+            parsed["_http_status"] = response.status_code
+            return parsed
+        return f"Error: {response.status_code} - {response.text}"
     except Exception as e:
         return f"Error: {e}"
 

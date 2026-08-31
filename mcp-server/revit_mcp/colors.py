@@ -867,7 +867,7 @@ def color_elements_by_parameter(
                 "status": "error",
                 "tx_status": tx_status,
                 "tx_ok": tx_ok,
-                "message": "Transaction did not commit (tx_status={}) - no colors were applied.".format(tx_status),
+                "error": "Transaction did not commit (tx_status={}) - no colors were applied.".format(tx_status),
             }
 
         result = {
@@ -1000,7 +1000,7 @@ def clear_element_colors(doc, category_name):
                 "status": "error",
                 "tx_status": tx_status,
                 "tx_ok": tx_ok,
-                "message": "Transaction did not commit (tx_status={}) - colors were not cleared.".format(tx_status),
+                "error": "Transaction did not commit (tx_status={}) - colors were not cleared.".format(tx_status),
             }
 
         return {
@@ -1156,6 +1156,16 @@ def register_color_routes(api):
                 doc, category_name, parameter_name, use_gradient, custom_colors
             )
 
+            # color_elements_by_parameter reports a transaction-commit
+            # failure as {"status": "error", "tx_ok": False, "error": ...}
+            # in its own return value, but make_response defaults to HTTP
+            # 200 regardless - a caller must not have to inspect the body
+            # to discover the transaction did not commit. Scoped narrowly to
+            # tx_ok is False (not any "status": "error") - the function's
+            # other, pre-existing "error" statuses (e.g. category not found)
+            # are a separate, already-200 behavior this fix does not change.
+            if result.get("tx_ok") is False:
+                return routes.make_response(data=result, status=500)
             return routes.make_response(data=result)
 
         except Exception as e:
@@ -1189,6 +1199,10 @@ def register_color_routes(api):
 
             result = clear_element_colors(doc, category_name)
 
+            # Same HTTP-status fix as color_splash above, same narrow scope:
+            # only the transaction-commit-failure shape (tx_ok is False).
+            if result.get("tx_ok") is False:
+                return routes.make_response(data=result, status=500)
             return routes.make_response(data=result)
 
         except Exception as e:

@@ -118,20 +118,42 @@ def _build_fake_db():
 def install_fake_pyrevit():
     """Idempotent: safe to call from multiple test modules.
 
-    `routes` and `revit` are empty stub submodules - present only so
+    `routes` and `revit` are stub submodules - present so
     `from pyrevit import routes, revit, DB` (every revit_mcp/*.py handler
-    file's import line) succeeds at import time. No test here calls through
-    them; a test that needs `routes.make_response` monkeypatches the
-    imported handler module's `routes` attribute directly (see
-    test_impact_helpers.py), the same technique used for live verification
-    against the real handler in this project's Revit sessions.
+    file's import line) succeeds at import time. `routes.make_response`
+    is a real, working fake (verified against the actual signature in
+    pyRevit's own source, pyrevitlib/pyrevit/routes/server/__init__.py:
+    make_response(data, status=200) -> Response(status=status, data=data)) -
+    every offline test that invokes a full route handler function (not just
+    a private helper) needs this to get a real `.status`/`.data` back,
+    exactly like the live handler does.
     """
     if "pyrevit" in sys.modules and getattr(sys.modules["pyrevit"], "_is_fake", False):
         return
     fake_db = _build_fake_db()
     fake_pyrevit = types.ModuleType("pyrevit")
     fake_pyrevit.DB = fake_db
-    fake_pyrevit.routes = types.ModuleType("routes")
+    fake_routes = types.ModuleType("routes")
+
+    class _FakeResponse(object):
+        """Mirrors pyrevit.routes.server.base.Response exactly: .status,
+        .data, .headers - the only attributes any revit_mcp/*.py handler
+        or test reads."""
+        def __init__(self, status=200, data=None, headers=None):
+            self.status = status
+            self.data = data
+            self._headers = headers or {}
+
+        @property
+        def headers(self):
+            return self._headers
+
+    def _fake_make_response(data, status=200, headers=None):
+        return _FakeResponse(status=status, data=data, headers=headers)
+
+    fake_routes.make_response = _fake_make_response
+    fake_routes.Response = _FakeResponse
+    fake_pyrevit.routes = fake_routes
     fake_pyrevit.revit = types.ModuleType("revit")
     fake_pyrevit._is_fake = True
     sys.modules["pyrevit"] = fake_pyrevit
@@ -161,3 +183,97 @@ def import_revit_mcp_module(name):
     sys.modules.pop(name, None)
     module = __import__(name)
     return module
+
+
+EXTENSION_ROOT = os.path.dirname(REVIT_MCP_DIR)
+
+
+def import_revit_mcp_module_as_package(name):
+    """Import revit_mcp/<name>.py as revit_mcp.<name> - a genuine package
+    submodule, not a bare top-level module.
+
+    A handful of revit_mcp/*.py files (colors.py is the one this project
+    has hit so far) mix "from utils import X" (bare) with
+    "from .utils import Y" (package-relative) in the same file - a
+    pre-existing quirk of how pyRevit's own loader makes both forms resolve
+    inside Revit, which import_revit_mcp_module()'s bare-import technique
+    cannot reproduce (a package-relative import raises ValueError: Attempted
+    relative import in non-package outside a real package). This mirrors the
+    fresh-reimport technique proven live against the running Revit process:
+    put both the extension root (so "revit_mcp.<name>" resolves) and
+    revit_mcp/ itself (so the sibling bare "from utils import ..." also
+    resolves) on sys.path, then import the dotted name."""
+    install_fake_pyrevit()
+    for path in (EXTENSION_ROOT, REVIT_MCP_DIR):
+        if path not in sys.path:
+            sys.path.insert(0, path)
+    sys.modules.pop("utils", None)
+    import utils  # noqa - see import_revit_mcp_module's identical comment
+    dotted = "revit_mcp." + name
+    for stale in (dotted, "revit_mcp"):
+        sys.modules.pop(stale, None)
+    module = __import__(dotted, fromlist=[name])
+    return module
+
+
+class FakeCategory(object):
+    """Minimal stand-in for a DB.Category: just a Name and an Id, which is
+    all clear_element_colors/color_elements_by_parameter read before ever
+    reaching a real element collection."""
+    def __init__(self, name, id_value=1):
+        self.Name = name
+        self.Id = id_value
+
+
+class FakeCategories(object):
+    """Minimal stand-in for doc.Settings.Categories: iterable of
+    FakeCategory, matching the "for cat in categories: if cat.Name == ..."
+    linear-scan pattern every category-lookup in colors.py/placement.py
+    uses."""
+    def __init__(self, categories):
+        self._categories = list(categories)
+
+    def __iter__(self):
+        return iter(self._categories)
+
+
+class FakeSettings(object):
+    def __init__(self, categories):
+        self.Categories = FakeCategories(categories)
+
+
+class FakeDoc(object):
+    """Minimal stand-in for a Revit Document - only what these tests'
+    handler functions read before they would need a real
+    FilteredElementCollector (which stays unfaked, per this project's own
+    mocking-strategy note in test_validation_helpers.py: DB-collection
+    behaviour is proven live, not re-shimmed offline)."""
+    def __init__(self, categories):
+        self.Settings = FakeSettings(categories)
+
+
+class FakeAPI(object):
+    """Minimal stand-in for pyRevit's routes.API: @api.route(path, ...)
+    just records the decorated function under its path and returns it
+    unchanged, so a route module's register_*_routes(api) can be called
+    directly and its handlers invoked like any other function - the same
+    technique proven live against the running Revit process."""
+    def __init__(self):
+        self.routes = {}
+
+    def route(self, path, methods=None):
+        def decorator(fn):
+            self.routes[path] = fn
+            return fn
+        return decorator
+
+
+class FakeRequest(object):
+    """Minimal stand-in for pyRevit's routes.Request: .data for a POST body,
+    .query_params for a GET query string - the only two attributes any
+    revit_mcp/*.py handler reads (verified against the real
+    pyrevit/routes/server/base.py Request class, C:\\Program
+    Files\\pyRevit-Master\\pyrevitlib\\pyrevit\\routes\\server\\base.py)."""
+    def __init__(self, data=None, query_params=None):
+        self.data = data if data is not None else {}
+        self.query_params = query_params if query_params is not None else {}

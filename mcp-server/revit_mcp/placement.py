@@ -508,7 +508,19 @@ def register_placement_routes(api):
     @api.route("/list_families/", methods=["GET"])
     def list_families(doc, request):
         """
-        Simplified: Get a flat list of up to 50 family names and their types in the current Revit model.
+        Get a flat list of family names and their types in the current Revit
+        model, optionally filtered by a case-insensitive substring against
+        either the family or type name and capped at a caller-supplied
+        limit. Both are query params: ?contains=Door&limit=100. Defaults:
+        no filter, limit 50.
+
+        Previously the query params were accepted by the MCP tool wrapper
+        but never read here, so a caller's contains/limit was silently
+        ignored and the response's "truncated_total" was actually just the
+        (always-50-capped) returned count, not a true total - this handler
+        now honors both params and reports the true total separately from
+        what was actually returned.
+
         Returns:
             list: [{ 'family_name': str, 'type_name': str, 'category': str, 'is_active': bool }]
         """
@@ -518,19 +530,40 @@ def register_placement_routes(api):
                     data={"error": "No active Revit document"}, status=503
                 )
 
+            query_params = request.query_params or {}
+
+            contains_raw = query_params.get("contains")
+            # A repeated query key parses to a list; treat that defensively
+            # as "no usable filter" rather than raising.
+            contains = (
+                contains_raw.lower()
+                if isinstance(contains_raw, str) and contains_raw
+                else None
+            )
+
+            limit = 50
+            limit_raw = query_params.get("limit")
+            if limit_raw is not None:
+                try:
+                    limit = int(limit_raw)
+                except (TypeError, ValueError):
+                    limit = 50
+            if limit <= 0:
+                limit = 50
+
             symbols = (
                 DB.FilteredElementCollector(doc).OfClass(DB.FamilySymbol).ToElements()
             )
-            families = []
+            matched = []
             for symbol in symbols:
-                if len(families) >= 50:
-                    break
                 try:
                     family_name = get_element_name(symbol.Family)
                     type_name = get_element_name(symbol)
                     category = symbol.Category.Name if symbol.Category else "Unknown"
                     is_active = symbol.IsActive
-                    families.append(
+                    if contains and contains not in family_name.lower() and contains not in type_name.lower():
+                        continue
+                    matched.append(
                         {
                             "family_name": family_name,
                             "type_name": type_name,
@@ -540,10 +573,17 @@ def register_placement_routes(api):
                     )
                 except Exception:
                     continue
+
+            total_matched = len(matched)
+            families = matched[:limit]
             return routes.make_response(
                 data={
                     "families": families,
-                    "truncated_total": len(families),
+                    "returned_count": len(families),
+                    "total_matched": total_matched,
+                    "truncated": total_matched > len(families),
+                    "limit": limit,
+                    "contains": contains_raw or None,
                     "status": "success",
                 }
             )
