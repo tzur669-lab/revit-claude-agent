@@ -74,9 +74,10 @@ pyRevit Routes       IronPython 2.7, inside Revit     ← pyRevit (installed sep
 Revit API
 ```
 
-**The connection** (`mcp-server/`) exposes 48 tools for building, editing,
-querying and analysing a live model. It is stateless — every call forgets the
-last.
+**The connection** (`mcp-server/`) exposes 50 tools for building, editing,
+querying and analysing a live model — including a relationship inspector and an
+always-rolled-back delete-impact dry run. It is stateless — every call forgets
+the last.
 
 **The memory** (`memory-system/`) rides the same channel: the `revit-session`
 skill runs `tracker.py` *inside Revit* through the server's code-execution tool,

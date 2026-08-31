@@ -37,7 +37,7 @@ AI Client (Claude Code)  →  MCP Server (Python 3.11+, FastMCP)  →  pyRevit R
 | `main.py` + `tools/` | CPython 3.11+ | The machine | MCP protocol, tool definitions |
 | `startup.py` + `revit_mcp/` | IronPython 2.7 | Inside the Revit process | route handlers, API calls |
 
-### 48 tools, six categories
+### 50 tools, six categories
 
 All tools take dimensions in millimeters — the conversion to feet, Revit's
 internal unit, happens inside the server. Revit versions 2024–2027 are supported
@@ -49,10 +49,16 @@ between versions, auto-detected at runtime — no manual configuration.
 | 15 | Creation | `create_level` · `place_family` · `create_room` · `create_duct` |
 | 12 | Query | `list_levels` · `get_element_properties` · `get_revit_view` |
 | 8 | Editing | `modify_element` · `transform_elements` · `tag_elements` |
-| 5 | Analysis | `check_clashes` · `analyze_model_statistics` |
+| 7 | Analysis | `check_clashes` · `analyze_model_statistics` · `analyze_relationships` · `preview_delete_impact` |
 | 3 | Documentation | `create_dimensions` · `export_document` |
 | 4 | Interop and save | `export_ifc` · `link_file` · `save_document` |
 | 1 | Advanced | `execute_revit_code` — run arbitrary IronPython inside Revit |
+
+`analyze_relationships` and `preview_delete_impact` (`revit_mcp/impact.py`) are the
+first deliverable past the Milestone 0–3 hard gate — see
+[operation-contracts.md](operation-contracts.md#read-only-and-dry-run-operations--a-third-contract-not-level-12)
+for their contract, and the "Impact analysis" section below for how they relate to
+the three verification levels.
 
 ### Companion tool: a manual pipe into Revit
 
@@ -111,6 +117,30 @@ Level 3 is what the rest of this document describes. It is not being replaced �
 it is the one level that was already built correctly, and it stays the authority
 for "did the actual work succeed," because a route handler can only ever certify
 its own operation, never the user's full request.
+
+### Impact analysis: a fourth, different kind of question
+
+The three levels above all answer *"did the thing I just did work?"* — after the
+fact, about a mutation that already happened. `revit_mcp/impact.py` (added after
+the Milestone 0–3 hard gate) answers a question none of the three levels ask at
+all: *"what would happen if I did this?"* — before anything is committed, often
+before anything is even attempted.
+
+Two tools, deliberately not one, because they trust different sources of truth:
+
+- **`analyze_relationships`** — a static read: Revit's own dependency graph
+  (`GetDependentElements`), geometry joins, host/hosted-by, room-boundary
+  membership. Fast, but informational — it does not claim to predict a cascade.
+- **`preview_delete_impact`** — the actual `doc.Delete()` runs for real inside a
+  transaction that is *always* rolled back, never committed. This is Revit's own
+  cascade logic producing the real answer, then discarded — the same
+  guaranteed-rollback discipline the tracker's own snapshot ops use so a read
+  never touches Undo, applied here to a mutation instead of a read.
+
+Neither fits the `verified.{ok,method,expected,actual}` schema level 2 uses,
+because neither commits anything for that schema to describe — see
+`docs/operation-contracts.md` for their full contract and the live verification
+each was proven against.
 
 ### Three working assumptions the system is built around
 

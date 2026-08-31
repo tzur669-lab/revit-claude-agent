@@ -312,6 +312,73 @@ limits : does not verify the saved file's content is valid/complete,
 
 ---
 
+## Read-only and dry-run operations — a third contract, not level 1/2
+
+Two operations added after the Milestone 0–3 gate (`revit_mcp/impact.py`, first
+deliverable of the deferred relationship/impact-analysis phase) answer "what is
+this connected to" and "what would deleting it actually do." Neither fits the
+level-1/level-2 vocabulary above, because neither is a mutation:
+
+### `analyze_relationships` (`impact.py`)
+
+```
+tx     : none - opens no Transaction at all
+post   : not_checked, structurally - there is no committed state to verify
+method : GetDependentElements(None), JoinGeometryUtils.GetJoinedElements,
+         Host/hosted-by (one FilteredElementCollector pass over
+         FamilyInstances, grouped by host id), room-boundary membership
+         (one pass over Room.GetBoundarySegments), Document.GetRoomAtPoint
+tol    : n/a
+limits : this is Revit's own *informational* dependency graph, not a
+         prediction of what an actual delete would remove. Measured live
+         2026-08-31: every relationship call is cheap at this project's
+         model scale (GetDependentElements ~0.4ms/element, GetJoinedElements
+         ~0.4ms/element, GetBoundarySegments ~0.3ms/room over 44 walls / 16
+         rooms) but cost was not measured on a large model. Also measured:
+         this project's model has zero wall-to-wall geometry joins at all
+         (confirmed independently via AreElementsJoined on every
+         geometrically-adjacent wall pair) - a real, if unflattering,
+         property of how this course model was built, not a bug in the
+         relationship code. Treat this tool's output as a map, not a
+         guarantee - see preview_delete_impact for the authoritative
+         version of "what would actually be removed."
+```
+
+### `preview_delete_impact` (`impact.py`)
+
+```
+tx     : DB.Transaction, but never committed - always t.RollBack(),
+         unconditionally, in a finally block. This is the one handler in
+         the project whose entire contract is "ends in RolledBack", the
+         opposite of what commit_verified checks for - so it deliberately
+         does not call commit_verified at all.
+post   : the real doc.Delete() cascade is captured (would_delete_ids,
+         cascaded_ids), then rolled back
+method : live-verified 2026-08-31 through the actual wired handler (fresh
+         re-import + fake-API harness, same technique Milestone 1 used):
+         deleting wall 1658707 (which hosts door 1660218) correctly
+         reported would_delete_count=2, cascaded_ids=[1660218], tx_status
+         "RolledBack" - and both elements were confirmed via a direct
+         doc.GetElement() check to still exist immediately afterward
+tol    : n/a
+limits : element descriptions for cascaded ids are captured from a
+         pre-delete GetDependentElements(None) probe taken BEFORE anything
+         is actually deleted - once doc.Delete() runs mid-transaction,
+         cascaded ids stop resolving via doc.GetElement() immediately,
+         well before RollBack() is ever called. A cascade id the probe
+         didn't surface falls back to "Unknown (already removed)" rather
+         than a fabricated description. GetDependentElements is explicitly
+         one level and informational; it is used here only to pre-label
+         ids, never trusted as the answer to "what would be deleted" -
+         that answer is doc.Delete()'s own return value.
+```
+
+Both are intentionally excluded from the `verified.{ok,method,expected,actual}`
+schema above: that schema exists to answer "did this mutation's own contract
+hold," and neither of these two operations mutates anything that persists.
+
+---
+
 ## What is deliberately out of scope for this matrix
 
 - **Rotation/mirror geometric verification**, **schedule field verification**,
@@ -322,9 +389,18 @@ limits : does not verify the saved file's content is valid/complete,
 - **`load_family`** — manages its own transaction internally (`doc.LoadFamily`);
   no `Transaction` object is ever constructed in this handler, so `commit_verified`
   does not apply. Its own return value (`ok`/bool) is Revit's own success signal.
-- **Impact/dependency analysis** (which other elements does this change touch) —
-  Milestone 3+ work per the project's own roadmap, not part of verification levels
-  1–2 at all.
+- **Move/rotate impact preview** — `preview_delete_impact` covers deletion, where
+  `doc.Delete()`'s own return value gives an authoritative affected-id list for
+  free. No equivalent single authoritative call exists for "what would moving
+  this wall disconnect" — `analyze_relationships`'s static join/host/dependent
+  data is the closest available signal today, with the limits documented above.
+- **Relationship history** (did this element's joins/host change since last
+  session) — would need the relationship data captured into the snapshot itself,
+  following the `pv`-blob precedent (`tracker.py`'s `diff_snapshots` already
+  excludes the blob field from comparison). Not built this session: it answers a
+  different question (drift over time) than the live queries above (current
+  state), and the live queries were the higher-value, lower-risk first step —
+  zero snapshot-format risk, since they touch no persisted format at all.
 
 ## Updating this matrix
 
