@@ -28,6 +28,7 @@ def register_tools(mcp_server, revit_get_func, revit_post_func, revit_image_func
     from .clash_tools import register_clash_tools
     from .document_tools import register_document_tools
     from .impact_tools import register_impact_tools
+    from .validation_tools import register_validation_tools
 
     # Register tools from each module
     register_status_tools(mcp_server, revit_get_func)
@@ -55,3 +56,4 @@ def register_tools(mcp_server, revit_get_func, revit_post_func, revit_image_func
     register_clash_tools(mcp_server, revit_get_func, revit_post_func, revit_image_func)
     register_document_tools(mcp_server, revit_get_func, revit_post_func, revit_image_func)
     register_impact_tools(mcp_server, revit_get_func, revit_post_func, revit_image_func)
+    register_validation_tools(mcp_server, revit_get_func, revit_post_func, revit_image_func)

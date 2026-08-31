@@ -37,7 +37,7 @@ AI Client (Claude Code)  →  MCP Server (Python 3.11+, FastMCP)  →  pyRevit R
 | `main.py` + `tools/` | CPython 3.11+ | The machine | MCP protocol, tool definitions |
 | `startup.py` + `revit_mcp/` | IronPython 2.7 | Inside the Revit process | route handlers, API calls |
 
-### 50 tools, six categories
+### 51 tools, six categories
 
 All tools take dimensions in millimeters — the conversion to feet, Revit's
 internal unit, happens inside the server. Revit versions 2024–2027 are supported
@@ -49,16 +49,17 @@ between versions, auto-detected at runtime — no manual configuration.
 | 15 | Creation | `create_level` · `place_family` · `create_room` · `create_duct` |
 | 12 | Query | `list_levels` · `get_element_properties` · `get_revit_view` |
 | 8 | Editing | `modify_element` · `transform_elements` · `tag_elements` |
-| 7 | Analysis | `check_clashes` · `analyze_model_statistics` · `analyze_relationships` · `preview_delete_impact` |
+| 8 | Analysis | `check_clashes` · `analyze_model_statistics` · `analyze_relationships` · `preview_delete_impact` · `validate_design` |
 | 3 | Documentation | `create_dimensions` · `export_document` |
 | 4 | Interop and save | `export_ifc` · `link_file` · `save_document` |
 | 1 | Advanced | `execute_revit_code` — run arbitrary IronPython inside Revit |
 
 `analyze_relationships` and `preview_delete_impact` (`revit_mcp/impact.py`) are the
-first deliverable past the Milestone 0–3 hard gate — see
+first deliverable past the Milestone 0–3 hard gate; `validate_design`
+(`revit_mcp/validation.py`) is the second — see
 [operation-contracts.md](operation-contracts.md#read-only-and-dry-run-operations--a-third-contract-not-level-12)
-for their contract, and the "Impact analysis" section below for how they relate to
-the three verification levels.
+for all three tools' contracts, and the "Impact analysis" section below for how
+the first two relate to the three verification levels.
 
 ### Companion tool: a manual pipe into Revit
 
@@ -297,6 +298,44 @@ encoding bug), the fix was to temporarily change the name to ASCII, read, and
 restore. In one case the name was restored but `VIEW_DETAIL_LEVEL` stayed `Fine`
 instead of `Medium` — caught only in the diff of the next checkpoint. Save every
 field you touch, not just what you deliberately changed.
+
+</details>
+
+<details>
+<summary>A private rules file's Hebrew came back as one Unicode codepoint per UTF-8 byte</summary>
+
+Building `revit_mcp/validation.py`'s rules loader (2026-08-31): reading a UTF-8
+JSON file as raw bytes and handing it to IronPython 2.7's own `json.loads`
+does **not** UTF-8-auto-detect the way CPython's does — every Hebrew keyword came
+back as `u"\xd7\x9e\xd7\x98..."` (each UTF-8 byte reinterpreted as its own
+Latin-1 codepoint) instead of `u"מט..."`, and every keyword match
+silently failed — 0 rooms matched any rule, with no error at all. This is the
+exact mojibake shape `repair_hebrew_text()` already exists to reverse for
+request bodies (see the hebrew-encoding gotcha above), just hit from a new
+direction: a file read, not a request parse. The fix: decode the bytes as
+UTF-8 explicitly (`raw_bytes.decode("utf-8")`) before calling `json.loads`,
+so the mojibake never happens, rather than parsing corrupted text and
+repairing it after. Caught only because the room-type checks were verified
+live against real room names instead of trusted on the strength of "it
+imported without error."
+
+</details>
+
+<details>
+<summary>Formatting an int with a float precision spec crashes under IronPython, not CPython</summary>
+
+`"{:.0f}mm".format(n)` raised `ValueError: Precision not allowed in integer
+format specifier` under IronPython 2.7, where `n` came from a JSON rules-file
+value written without a decimal point (`json.loads` returns `int` for a number
+literal with no decimal point, `float` for one with a decimal point — a rules
+file is free-form external data, so either can show up). The identical line
+runs fine under CPython 3,
+where this offline test suite runs — so this could not have been caught
+offline, only live. The fix: don't apply a float format spec to a value that
+might be a JSON int; plain `{}` formatting displays an already-whole number
+just as well. A standing reminder that this project's offline tests prove
+CPython-side logic, and the IronPython engine underneath can still disagree
+in ways only a live call surfaces.
 
 </details>
 

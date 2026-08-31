@@ -377,6 +377,83 @@ Both are intentionally excluded from the `verified.{ok,method,expected,actual}`
 schema above: that schema exists to answer "did this mutation's own contract
 hold," and neither of these two operations mutates anything that persists.
 
+### `validate_design` (`validation.py`)
+
+**This engine has no jurisdiction of its own.** Every regulatory concept — which
+room types exist, their minimum area, and any room type needing checks beyond
+area — is data, supplied at runtime from a rules file this repo does not ship.
+**A project should point `rules_path` at whichever building code actually
+applies to it** — a room-size regulation is a property of where the building
+is, not of this tool, and nothing here assumes one country's numbers apply
+everywhere. Two projects in two different countries use the same engine with
+two completely different rules files; neither is the "real" one.
+
+```
+tx     : none - opens no Transaction at all
+post   : not_checked, structurally - there is no committed state to verify
+method : per-room checks against an external, private, locale-supplied rules
+         file (never committed to this repo - see module docstring). Each
+         finding is tagged fact / assumption / pass / violation / warning /
+         not_checked, never collapsed into a single pass/fail:
+           - room-type minimum area: room-type is INFERRED from the room's
+             free-text name (an assumption, named explicitly in the output),
+             then its area is checked against that type's minimum
+           - extended checks: any room type whose rule opts in via an
+             `extended_checks` block (a building code's own special-purpose
+             room - a protected space, a wet room, whatever that code calls
+             out by name) also gets net area, bounding-wall thickness (via
+             the same GetBoundarySegments walk analyze_relationships uses,
+             scoped to one room), ceiling height (Room's "Unbounded Height"
+             parameter), and volume (BuiltInParameter.ROOM_VOLUME, if volume
+             computation is enabled for the model) checked - nothing in the
+             code names or assumes which room type this applies to
+tol    : n/a - each rule's own threshold, read from the rules file, not
+         hardcoded in this engine
+limits : ROOM WIDTH, window-area-vs-floor-area rules, and the kitchen
+         work-triangle are NOT checked - explicit not_checked findings, not
+         silent gaps. "Unbounded Height" approximates but is not
+         independently confirmed against a modeled Ceiling element.
+         Room.Area's relationship to "net area" depends on the project's
+         Area Boundary Location setting, which this engine does not assert
+         generally - see docs/architecture.md's Measured traps for what one
+         project measured. Live-verified 2026-08-31 through the actual wired
+         handler against a real model, including both a room type using
+         extended_checks and one using only the generic area minimum - both
+         correctly reported real, previously-unknown violations, not
+         synthetic test cases (see the project's private notes for figures;
+         none are reproduced here, consistent with this section's own point).
+         Two real bugs were found and fixed by this same live verification,
+         not by the offline test suite - see docs/architecture.md's
+         "Measured traps": IronPython's json.loads not UTF-8-auto-detecting
+         raw bytes the way CPython's does, and an int loaded from JSON
+         crashing a `{:.0f}` format spec that a float value would not have.
+```
+
+**Rules file schema** (no real numbers below — this is the shape, not a standard):
+
+```jsonc
+{
+  "source": "<name/citation of the building code this file encodes>",
+  "room_types": [
+    {"id": "kitchen", "match_keywords": ["<locale's word(s) for kitchen>"],
+     "min_area_sqm": 0.0, "min_width_m": 0.0},
+    {"id": "<a locale's special-purpose room, e.g. a protected space>",
+     "match_keywords": ["<its local name>"],
+     "extended_checks": {
+       "net_area_sqm": 0.0, "relief_net_area_sqm": 0.0,
+       "wall_thickness_mm": 0, "ceiling_height_m": [0.0, 0.0],
+       "volume_cum": 0.0, "width_m": 0.0
+     }}
+  ]
+}
+```
+
+`match_keywords` order matters: list more specific room types before generic
+catch-alls, since the first rule whose keyword appears in the room's name wins
+(see `_match_room_type` and its tests). Default path:
+`~/.claude/revit-design-rules/room_standards.json`; override with `rules_path`
+per call for a multi-jurisdiction portfolio.
+
 ---
 
 ## What is deliberately out of scope for this matrix
