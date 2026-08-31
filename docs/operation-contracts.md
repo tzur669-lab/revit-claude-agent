@@ -178,8 +178,8 @@ limits : cascaded deletions (a hosted element removed along with its host)
          side effect, not the operation's own guarantee
 ```
 
-### `create_level` / `create_line_based` (wall, beam) / `create_surface_based`
-(floor, ceiling, roof) — `building.py`
+### `create_level` / `create_line_based_element` (wall, beam) /
+`create_surface_based_element` (floor, ceiling, roof) — `building.py`
 
 ```
 post   : each created id resolves AND carries the expected BuiltInCategory
@@ -269,7 +269,7 @@ limits : SAT/SKP/3DM imports and some link paths may not always yield a
          rather than asserting a pass with nothing to check.
 ```
 
-### `color_splash` / `clear_element_colors` (`colors.py`)
+### `color_splash` / `clear_colors` (`colors.py`)
 
 ```
 post   : not_checked

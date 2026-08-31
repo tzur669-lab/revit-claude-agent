@@ -6,7 +6,7 @@
 > this README is upstream's; the "clone" steps below are already done for you —
 > just `cd` here and `uv sync`.
 
-MCP server for Autodesk Revit 2024/2025/2026/2027 via pyRevit — 48 tools for building design, editing, analysis, clash detection, MEP, interop, documentation, and model persistence.
+MCP server for Autodesk Revit 2024/2025/2026/2027 via pyRevit — 51 tools for building design, editing, analysis, clash detection, MEP, interop, documentation, and model persistence.
 
 Works with any MCP client: Claude Desktop, Claude Code, Cursor, Windsurf, Copilot, or any other MCP-compatible application.
 
@@ -45,11 +45,12 @@ To verify: open a browser and go to `http://localhost:48884/` — you should see
 
 ## Quick Start
 
-### Step 1: Clone and install
+### Step 1: Install dependencies
+
+Already cloned — this directory is part of the `revit-claude-agent` checkout.
 
 ```bash
-git clone https://github.com/Demolinator/revit-mcp-server.git
-cd revit-mcp-server
+cd mcp-server
 uv sync
 ```
 
@@ -57,19 +58,23 @@ uv sync
 
 The `revit_mcp/` folder and `startup.py` need to run inside Revit via pyRevit.
 
-**Option A — Install from pyRevit (recommended):**
+**Install from this repo (the only option that keeps this fork's local
+patches — the Hebrew-text fixes, the commit_verified/post-condition
+verification layer, and impact.py/validation.py):**
 
-1. In Revit, go to pyRevit tab > Extensions
-2. Find "MCP Server for Revit Python" > Install
-3. Wait for pyRevit to reload
-
-**Option B — Manual install:**
-
-1. Copy the entire repo folder to `%APPDATA%\pyRevit\Extensions\`
+1. Copy this `mcp-server/` folder to `%APPDATA%\pyRevit\Extensions\`
 2. Rename the folder to `mcp-server-for-revit-python.extension`
 3. In Revit, go to pyRevit tab > Settings > Custom Extensions
 4. Add the path to the `.extension` folder
 5. Reload pyRevit (or restart Revit)
+
+`scripts/install.ps1 -LinkExtension` automates this as a dev-mode junction
+instead of a copy — see the repo root README for details.
+
+> **Do not** install "MCP Server for Revit Python" from pyRevit's own
+> Extensions catalog (pyRevit tab > Extensions > Find > Install). That
+> installs the **upstream** `Demolinator/revit-mcp-server` fork this
+> project vendors from — none of this repo's local changes are in it.
 
 ### Step 3: Activate pyRevit Routes
 
@@ -150,7 +155,7 @@ mcp dev main.py
 
 Then open `http://127.0.0.1:6274` in your browser.
 
-## Supported Tools (48)
+## Supported Tools (51)
 
 ### Create (15)
 
@@ -189,7 +194,7 @@ Then open `http://127.0.0.1:6274` in your browser.
 | `list_category_parameters` | List parameters for a category |
 | `get_element_properties` | Get all parameters and properties of an element |
 
-### Modify (8)
+### Modify (9)
 
 | Tool | Description |
 |------|-------------|
@@ -203,7 +208,7 @@ Then open `http://127.0.0.1:6274` in your browser.
 | `transform_elements` | Move, copy, rotate, or mirror elements |
 | `set_active_view` | Switch the active view in Revit |
 
-### Analyze (5)
+### Analyze (8)
 
 | Tool | Description |
 |------|-------------|
@@ -212,8 +217,11 @@ Then open `http://127.0.0.1:6274` in your browser.
 | `get_material_quantities` | Material takeoff data |
 | `check_clashes` | Detect hard clashes (interferences) between disciplines, e.g. structure vs MEP |
 | `analyze_model_statistics` | Element counts and model stats |
+| `analyze_relationships` | Inspect an element's dependents, joins, host/hosted-by, and room-boundary membership |
+| `preview_delete_impact` | Dry-run a delete (real `Delete()`, always rolled back) to see what would actually be removed, cascades included |
+| `validate_design` | Check rooms against an external, per-user design-standards file (facts/assumptions/violations/warnings — never a bare pass/fail) |
 
-### Document (3)
+### Document (2)
 
 | Tool | Description |
 |------|-------------|
@@ -253,7 +261,7 @@ This server supports Revit 2024, 2025, 2026, and 2027 through centralized helper
 
 No configuration needed — version detection is automatic via try/except at runtime.
 
-> **Revit 2027 note:** Revit 2027 runs on **.NET 10** (vs .NET 8 in 2025/2026). This MCP server is pyRevit-based, so .NET compatibility is handled by pyRevit itself — ensure you run a **pyRevit build with Revit 2027 support**. None of the 48 tools use APIs removed in 2027 (AXM/FormIt import, `Mechanical.Zone` members, legacy rebar creation, or the dropped `EnergyDataSettings` properties).
+> **Revit 2027 note:** Revit 2027 runs on **.NET 10** (vs .NET 8 in 2025/2026). This MCP server is pyRevit-based, so .NET compatibility is handled by pyRevit itself — ensure you run a **pyRevit build with Revit 2027 support**. None of the 51 tools use APIs removed in 2027 (AXM/FormIt import, `Mechanical.Zone` members, legacy rebar creation, or the dropped `EnergyDataSettings` properties).
 
 ## Unit Handling
 

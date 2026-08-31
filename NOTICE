@@ -27,7 +27,18 @@ Local modifications made in this repository are documented in
   - main.py                 pyRevit Routes port auto-discovery
   - revit_mcp/parameters.py preserve Unicode (Hebrew) text instead of
                             replacing non-ASCII with '?'
-  - revit_mcp/utils.py      same Unicode-preservation fix for string helpers
+  - revit_mcp/utils.py      same Unicode-preservation fix for string helpers,
+                            plus the repair-Hebrew-coming-in fix, and the
+                            level-1 commit_verified() / level-2 post-condition
+                            verification helpers (see PATCH-NOTES.md §4, §6)
+  - revit_mcp/*.py          21 files call the Hebrew-repair fix; 16 files
+    (16 files)              call commit_verified() for the mutating routes
+                            they register (PATCH-NOTES.md §4, §6)
+  - revit_mcp/impact.py,    new files, no upstream equivalent:
+    revit_mcp/validation.py analyze_relationships / preview_delete_impact /
+                            validate_design (PATCH-NOTES.md §6)
+  - revit_mcp/code_execution.py  #!notx opts out of the wrapping transaction
+                            (PATCH-NOTES.md §5)
 
 --------------------------------------------------------------------------------
 pyrevit-extension/BIMAgents.extension/  —  Claude QTO Extract

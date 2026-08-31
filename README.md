@@ -12,7 +12,7 @@ BIM models change constantly, and usually by more than one hand. When an AI
 assistant joins that loop it can move fast — but it has amnesia: every request
 starts from zero, and nothing records what it touched or why. `revit-claude-agent`
 addresses both halves. It connects [Claude Code](https://claude.com/claude-code)
-to a live Revit session through 48 modelling tools, and wraps that connection in
+to a live Revit session through 51 modelling tools, and wraps that connection in
 a tracking layer that photographs the model *before* any work, detects every
 change since last time — including edits a colleague made by hand in Revit —
 attributes each one to a person or to the AI **by evidence**, and writes a
@@ -50,7 +50,7 @@ memory.
   captured and journaled on the next session, so the project history stays whole.
 - **Reach the rest of the model.** Clash detection, MEP routing, view / sheet /
   schedule creation, IFC export, and arbitrary Revit API scripting through the
-  48 MCP tools.
+  51 MCP tools.
 - **Record a "why", not just a "what".** Every journal entry keeps the request and
   the reasoning ("identical mirrored-apartment plan around a central core"), so
   *"725 elements added"* is still legible a month later.
@@ -86,7 +86,7 @@ It is the part that "first maps what already exists" before anything is touched.
 
 | Player | Runs where | Role |
 |---|---|---|
-| `mcp-server/` | your machine | the MCP protocol and the 48 tool definitions |
+| `mcp-server/` | your machine | the MCP protocol and the 51 tool definitions |
 | `memory-system/tracker/tracker.py` | inside the Revit process | snapshot, diff, attribution |
 | `revit-session` skill | Claude Code | the protocol — when to snapshot, checkpoint, and log |
 | `revit-historian` agent | background | rebuilds a history briefing from disk, in parallel |
@@ -112,9 +112,9 @@ memory-system/
     revit-lessons/RULES.md   global, cross-project, user-approved rules only
     settings.example.json    the hook wiring to merge into ~/.claude/settings.json
 pyrevit-extension/     BIMAgents.extension — the "Extract QTO Data" ribbon button
-docs/                  architecture + workflow write-ups
+docs/                  architecture + workflow write-ups + the operation-contracts matrix
 scripts/               install.ps1 / uninstall.ps1
-config.example.jsonc   the two installation-specific paths
+config.example.jsonc   the three installation-specific values
 ```
 
 ---

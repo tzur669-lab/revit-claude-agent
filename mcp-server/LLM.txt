@@ -16,44 +16,30 @@ This is a context document for LLMs tasked with developing functionalities for t
 This implementation uses a **modular architecture** that separates concerns and makes it easy to add new functionality:
 
 ### **Project Structure**
+
+This whole tree lives at `mcp-server/` in the `revit-claude-agent` repo - there
+is no separate `revit-mcp-python.extension/` wrapper directory; `revit_mcp/`
+sits directly alongside `tools/`. It becomes a pyRevit extension only once
+installed (copied or junctioned) to
+`%APPDATA%\pyRevit\Extensions\mcp-server-for-revit-python.extension\` - see
+the repo root README for install steps.
+
 ```
-revit-mcp-python/
-├── main.py                                    # MCP Server (FastMCP implementation)
-├── tools/                                     # MCP Tool definitions (organized by functionality)
-│   ├── __init__.py                           # Tool registration system (12 modules)
-│   ├── utils.py                              # Utility functions for response formatting
-│   ├── status_tools.py                       # Status and connectivity tools
-│   ├── model_tools.py                        # Model information tools
-│   ├── view_tools.py                         # View export and image tools
-│   ├── family_tools.py                       # Family placement and management tools
-│   ├── colors_tools.py                       # Color splashing tools
-│   ├── code_execution_tools.py               # Code execution tools
-│   ├── building_tools.py                     # Building creation (walls, floors, roofs, levels)
-│   ├── editing_tools.py                      # Element editing (delete, modify, select)
-│   ├── structure_tools.py                    # Structural (grids, framing)
-│   ├── annotation_tools.py                   # Annotation (dimensions, wall tags)
-│   ├── analysis_tools.py                     # Analysis (filter, rooms, materials, statistics)
-│   └── documentation_tools.py                # Documentation (sheets, schedules, export)
-├── revit-mcp-python.extension/               # pyRevit Extension
-│   ├── startup.py                            # Extension entry point - registers all routes
-│   └── revit_mcp/                            # Routes API modules (organized by functionality)
-│       ├── __init__.py
-│       ├── status.py                         # Health check and status endpoints
-│       ├── model_info.py                     # Model information endpoints
-│       ├── views.py                          # View export endpoints
-│       ├── placement.py                      # Family placement endpoints
-│       ├── utils.py                          # Utility functions for IronPython compatibility
-│       ├── colors.py                         # Color splashing endpoints
-│       ├── code_execution.py                 # Code execution endpoints
-│       ├── building.py                       # Building creation routes (walls, floors, roofs, levels)
-│       ├── editing.py                        # Element editing routes (delete, modify, select)
-│       ├── structure.py                      # Structural routes (grids, framing)
-│       ├── annotation.py                     # Annotation routes (dimensions, wall tags)
-│       ├── analysis.py                       # Analysis routes (filter, rooms, materials, statistics)
-│       └── documentation.py                  # Documentation routes (sheets, schedules, export)
-├── requirements.txt                          # Python dependencies
-├── pyproject.toml                           # Project configuration
-└── README.md                                # Project documentation
+mcp-server/
+├── main.py                # MCP Server (FastMCP implementation)
+├── startup.py              # pyRevit extension entry point - registers all routes
+├── tools/                  # MCP Tool definitions (CPython 3.11+, runs on your machine)
+│   ├── __init__.py         # Tool registration system
+│   ├── registry.py         # Machine-readable tool metadata (category/risk/mutating/contract)
+│   ├── ast_facts.py        # AST-derived facts about tools/routes - the source of truth
+│   ├── utils.py             # Response formatting (format_response)
+│   └── *_tools.py           # One module per tool group - see docs/TOOLS.md for the full,
+│                             # generated, always-current list of every tool and its module
+└── revit_mcp/               # Routes API modules (IronPython 2.7, runs inside Revit)
+    ├── __init__.py
+    ├── utils.py              # commit_verified / verify_* helpers, Hebrew-text repair
+    └── *.py                  # One module per route group, mirroring tools/*_tools.py -
+                                # see docs/TOOLS.md for the full, generated, always-current list
 ```
 
 ### **Key Architecture Components**
@@ -64,7 +50,8 @@ revit-mcp-python/
    - Registers tools from modular tool system
    - Provides helper functions for GET/POST/Image requests
 
-2. **pyRevit Extension (`revit-mcp-python.extension/`)**:
+2. **pyRevit Extension (`revit_mcp/` + `startup.py`, both at the `mcp-server/`
+   root)**:
    - Contains the Routes API that runs inside Revit
    - Modular route registration in `startup.py`
    - Individual route modules in `revit_mcp/` directory
@@ -425,119 +412,19 @@ It contains:
 
 ## **Available Tools** |
 
-The implementation provides 31 tools organized by category:
+**See [`docs/TOOLS.md`](../docs/TOOLS.md) for the full, current list of every
+tool, its category, risk, and route** - generated directly from
+`tools/*_tools.py` and `revit_mcp/*.py` by `scripts/gen_tool_docs.py`, so it
+cannot go stale the way a hand-maintained list here previously had (its own
+claimed count no longer matched the codebase); the real, derived count is in
+`docs/TOOLS.md`'s own heading and is checked by `tests/test_tool_registry.py`
+on every run).
 
-### **Status & Connectivity Tools (2)**
-- **get_revit_status**: Check if the Revit MCP API is active and responding
-- **get_revit_model_info**: Get comprehensive information about the current Revit model
-
-### **Model Information Tools (1)**
-- **list_levels**: Get all levels with elevation information in the current Revit model
-
-### **View & Image Tools (4)**
-- **get_revit_view**: Export a specific Revit view as an image
-- **list_revit_views**: Get a list of all exportable views in the current Revit model
-- **get_current_view_info**: Get details about the active Revit view
-- **get_current_view_elements**: Get all elements visible in the current view
-
-### **Family & Placement Tools (3)**
-- **place_family**: Place a family instance at a specified location
-- **list_families**: Get available family types, optionally filtered
-- **list_family_categories**: Get all family categories in the model
-
-### **Building Creation Tools (3)**
-- **create_level**: Create building levels (floor elevations) — must be done before walls/floors
-- **create_line_based_element**: Create walls, beams, and other line-based elements (batch)
-- **create_surface_based_element**: Create floors, roofs, ceilings (batch, closed boundary polygon)
-
-### **Editing Tools (3)**
-- **delete_elements**: Delete elements by ID, reports cascaded deletions (hosted elements)
-- **modify_element**: Change parameter values on a Revit element
-- **get_selected_elements**: Get details of elements selected in the Revit UI
-
-### **Structure Tools (2)**
-- **create_grid**: Create grid lines for structural column layout (batch)
-- **create_structural_framing**: Create structural beams and framing elements (batch)
-
-### **Annotation Tools (2)**
-- **create_dimensions**: Create dimension annotations for elements in the current view
-- **tag_walls**: Tag all untagged walls in the current view
-
-### **Analysis Tools (4)**
-- **ai_element_filter**: Filter elements by category, type, visibility, and spatial bounds
-- **export_room_data**: Export room names, numbers, areas, perimeters, departments
-- **get_material_quantities**: Get aggregated material areas and volumes for takeoffs
-- **analyze_model_statistics**: Get element counts grouped by category
-
-### **Documentation Tools (3)**
-- **create_sheet**: Create a drawing sheet with title block for construction docs
-- **create_schedule**: Create a schedule (quantity takeoff view) for a category
-- **export_document**: Export a view/sheet to PDF, PNG, JPG, or DWG
-
-### **Color Tools (3)**
-- **color_splash**: Color elements by category and parameter value
-- **clear_colors**: Remove all color overrides from a category
-- **list_category_parameters**: Get available parameters for elements in a category
-
-### **Code Execution Tools (1)**
-- **execute_revit_code**: Execute IronPython 2.7 code directly in Revit context (escape hatch)
-
----
-
-## **Current Route Endpoints** |
-
-The pyRevit extension exposes these HTTP endpoints under `http://localhost:48884/revit_mcp/`:
-
-### **Status Endpoints**
-- `GET /status/` - Health check and API status
-- `GET /model_info/` - Comprehensive model information
-
-### **Model & View Endpoints**
-- `GET /list_levels/` - Get all levels with elevation information
-- `GET /get_view/<view_name>` - Export specific view as PNG image
-- `GET /list_views/` - Get all exportable views organized by type
-- `GET /current_view_info/` - Get active view details
-- `GET /current_view_elements/` - Get elements visible in active view
-
-### **Family & Placement Endpoints**
-- `POST /place_family/` - Place family instance with detailed parameters
-- `GET /list_families/` - Get available families and types
-- `GET /list_family_categories/` - Get family categories with counts
-
-### **Building Creation Endpoints**
-- `POST /create_level/` - Create building levels
-- `POST /create_line/` - Create walls, beams (line-based elements)
-- `POST /create_surface/` - Create floors, roofs, ceilings (surface-based elements)
-
-### **Editing Endpoints**
-- `POST /delete_elements/` - Delete elements by ID (cascade-deletes hosted elements)
-- `POST /modify_element/` - Modify element parameter values
-- `GET /selected_elements/` - Get currently selected elements
-
-### **Structure Endpoints**
-- `POST /create_grid/` - Create grid lines
-- `POST /create_framing/` - Create structural beams
-
-### **Annotation Endpoints**
-- `POST /create_dimensions/` - Create dimension annotations
-- `POST /tag_walls/` - Tag all untagged walls in view
-
-### **Analysis Endpoints**
-- `POST /ai_filter/` - Filter elements by category, type, visibility, spatial bounds
-- `GET /room_data/` - Export room data (names, areas, perimeters)
-- `POST /material_quantities/` - Get material quantities (areas, volumes)
-- `GET /model_statistics/` - Get element counts by category
-
-### **Documentation Endpoints**
-- `POST /create_sheet/` - Create drawing sheet
-- `POST /create_schedule/` - Create schedule view
-- `POST /export_document/` - Export view to PDF/PNG/JPG/DWG
-
-### **Color & Code Endpoints**
-- `POST /color_splash/` - Color elements by parameter value
-- `POST /clear_colors/` - Remove color overrides
-- `POST /list_category_parameters/` - Get available parameters for a category
-- `POST /execute_code/` - Execute IronPython code in Revit context
+Do not hand-list tools in this file again - point here instead, and if a new
+tool needs describing for LLM context beyond what `docs/TOOLS.md` (generated
+from `registry.py`'s category/risk/mutating/contract fields plus each tool's
+own docstring) already gives, extend `registry.py`'s metadata or the tool's
+own docstring rather than adding a second, parallel inventory here.
 
 ---
 
@@ -554,10 +441,13 @@ The modular architecture makes it easy to add new functionality. The process inv
 
 ### **Part 1: Create the Route Module in Revit**
 
-First, create a new Python file within the `revit-mcp-python.extension/revit_mcp/` directory (e.g., `revit_mcp/your_module.py`). This module will contain all the related functions you want to expose, whether they are for reading data (`GET`) or modifying the model (`POST`).
+First, create a new Python file within the `revit_mcp/` directory (e.g.,
+`revit_mcp/your_module.py`). This module will contain all the related
+functions you want to expose, whether they are for reading data (`GET`) or
+modifying the model (`POST`).
 
 ```
-# In revit-mcp-python.extension/revit_mcp/your_module.py
+# In revit_mcp/your_module.py
 
 # -*- coding: UTF-8 -*-
 """
@@ -668,10 +558,10 @@ Finally, register both the route module and the tool module. This makes them act
 
 **1. Register the Route Module:**
 
-Open `revit-mcp-python.extension/startup.py` and add your new route registration function.
+Open `startup.py` (at the `mcp-server/` root) and add your new route registration function.
 
 ```
-# In revit-mcp-python.extension/startup.py
+# In startup.py
 
 # ... (other imports)
 # Import the registration function from your new module

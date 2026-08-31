@@ -57,3 +57,63 @@ def register_tools(mcp_server, revit_get_func, revit_post_func, revit_image_func
     register_document_tools(mcp_server, revit_get_func, revit_post_func, revit_image_func)
     register_impact_tools(mcp_server, revit_get_func, revit_post_func, revit_image_func)
     register_validation_tools(mcp_server, revit_get_func, revit_post_func, revit_image_func)
+
+    _attach_registry_annotations(mcp_server)
+
+
+def _attach_registry_annotations(mcp_server):
+    """Attach MCP-standard ToolAnnotations (readOnlyHint / destructiveHint)
+    to every already-registered tool, sourced from registry.py's "risk"
+    field - one edit site instead of adding annotations= to all 51
+    individual @mcp.tool() decorator call sites across 24 files.
+
+    Reaches into FastMCP's private ToolManager (mcp._tool_manager) because
+    there is no public API for mutating an already-registered tool's
+    annotations - the Tool.annotations field is a plain, mutable pydantic
+    field, just not exposed for external mutation. This is exactly the kind
+    of internal surface that can move under a dependency bump, so failure
+    here is caught and logged, never allowed to break tool registration
+    itself: every tool is fully usable with or without this pass succeeding,
+    since annotations are advisory metadata, not part of the MCP protocol's
+    functional contract. See tests/test_tool_registry.py for the strict
+    check that this pass actually took effect - a caught exception here
+    must make THAT test fail, not silently look like success.
+    """
+    try:
+        from mcp.types import ToolAnnotations
+        from .registry import TOOLS
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(
+            "Could not import ToolAnnotations/registry - tool annotations "
+            "not attached: %s", e
+        )
+        return
+
+    try:
+        tool_manager = mcp_server._tool_manager
+    except AttributeError as e:
+        import logging
+        logging.getLogger(__name__).warning(
+            "FastMCP's internal tool manager attribute has changed or is "
+            "missing - tool annotations not attached: %s", e
+        )
+        return
+
+    for name, entry in TOOLS.items():
+        try:
+            tool = tool_manager.get_tool(name)
+        except Exception:
+            tool = None
+        if tool is None:
+            continue
+        try:
+            tool.annotations = ToolAnnotations(
+                readOnlyHint=(entry["risk"] == "read"),
+                destructiveHint=(entry["risk"] == "destructive"),
+            )
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(
+                "Could not set annotations for tool %r: %s", name, e
+            )

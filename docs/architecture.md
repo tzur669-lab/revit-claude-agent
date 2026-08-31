@@ -37,7 +37,7 @@ AI Client (Claude Code)  →  MCP Server (Python 3.11+, FastMCP)  →  pyRevit R
 | `main.py` + `tools/` | CPython 3.11+ | The machine | MCP protocol, tool definitions |
 | `startup.py` + `revit_mcp/` | IronPython 2.7 | Inside the Revit process | route handlers, API calls |
 
-### 51 tools, six categories
+### 51 tools, seven categories
 
 All tools take dimensions in millimeters — the conversion to feet, Revit's
 internal unit, happens inside the server. Revit versions 2024–2027 are supported

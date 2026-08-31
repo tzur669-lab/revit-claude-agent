@@ -5,9 +5,20 @@
 (MIT — see `mcp-server/LICENSE`), pinned at upstream commit `40af5a7`
 ("Merge PR #2: fix get_revit_model_info formatting + stdio cold-start test").
 
-Five source files carry local changes on top of that commit. `uv.lock` is
-regenerated (lockfile format `revision 1 -> 3`, adds `upload-time` metadata; no
+Local changes on top of that commit have grown well past the original five
+files (§§1-5 below): the level-1/level-2 verification layer
+(`commit_verified`, `verify_created_elements`, `param_read_matches` and the
+shared `verified` response shape - wired into every mutating handler) plus
+two entirely new route/tool modules, `impact.py` and `validation.py`, that
+have no upstream equivalent at all (§6 below). `uv.lock` is regenerated
+(lockfile format `revision 1 -> 3`, adds `upload-time` metadata; no
 dependency versions changed).
+
+Run the diff command below for the exact, current file list - the count is
+not restated here as a number precisely because it would drift the same way
+the "20 route handlers / 20 call sites" claim below already had (the real
+figures are 21 files, 38 call sites; fixed in place rather than left as a
+second stale number).
 
 To see the exact diff against upstream:
 
@@ -55,7 +66,7 @@ query tools useless on any localized model.
 **Why:** identical to #2 — these helpers are on the path for element names in
 several tool responses.
 
-## 4. `revit_mcp/utils.py`, and all 20 route handlers — repair Hebrew coming **in**
+## 4. `revit_mcp/utils.py`, and 21 route-handler files — repair Hebrew coming **in**
 
 **Upstream:** no equivalent. Text sent as a parameter to any route (friendly
 tool or `execute_revit_code`) arrives already corrupted: pyRevit's own
@@ -66,9 +77,10 @@ comparison against that text then fails silently — 0 results, no error.
 **Change:** `repair_hebrew_text()` reverses the corruption
 (`encode("latin-1").decode("utf-8")`, a safe no-op on text that was never
 corrupted) and `repair_hebrew_in()` applies it recursively to every string in a
-parsed JSON value. Every route handler calls `data = repair_hebrew_in(data)` as
-the first thing it does with `request.data` — 20 call sites, one per handler,
-not one shared patch.
+parsed JSON value. Every POST route handler calls `data = repair_hebrew_in(data)`
+as the first thing it does with `request.data` — 38 call sites across 21
+files (some handler files register more than one POST route, hence more call
+sites than files), not one shared patch.
 
 **Why not one shared patch:** an earlier attempt monkeypatched pyRevit core's
 own `HttpRequestHandler` from `startup.py`. It does not work — pyRevit runs a
@@ -98,6 +110,39 @@ None` throughout instead of assuming a transaction always exists.
 `SketchEditScope`, `TopographyEditScope`) refuse to start while the document is
 already inside another modifiable transaction — the pre-existing wrapper made
 those APIs entirely unreachable from `execute_revit_code`.
+
+## 6. `revit_mcp/utils.py` + 16 handler files — the level-1/level-2 verification layer, plus `impact.py`/`validation.py` (no upstream equivalent)
+
+**Upstream:** a mutating route calls `t.Commit()` and returns success if
+nothing raised. `Commit()` returning `RolledBack` without raising - the
+mechanism behind "the API call succeeded and moved nothing" - was
+unobservable to any caller.
+
+**Change:**
+
+- `commit_verified(t)` in `revit_mcp/utils.py` (level 1): commits a
+  transaction and reports the real `DB.TransactionStatus`, tri-state
+  (`True`/`False`/`None` for the `#!notx` "self-managed" case). Wired into
+  every mutating handler that opens a `DB.Transaction` (16 files).
+- Per-operation level-2 post-conditions: shared helpers
+  `verify_created_elements` and `param_read_matches` (also in
+  `revit_mcp/utils.py`), plus per-handler checks, each producing the
+  documented `verified: {ok, method, expected, actual}` (or `not_checked`
+  with a reason) shape. Full contract-by-contract detail lives in
+  `docs/operation-contracts.md`.
+- Two new files with no upstream equivalent at all:
+  `revit_mcp/impact.py` (`analyze_relationships`, `preview_delete_impact` - a
+  real `doc.Delete()` inside a transaction that is always rolled back, never
+  committed) and `revit_mcp/validation.py` (`validate_design` - checks rooms
+  against an external, per-user, jurisdiction-neutral rules file). Both are
+  read-only from a caller's perspective and use a third, different
+  verification story from commit_verified - see their own module docstrings
+  and `docs/operation-contracts.md`'s read-only/dry-run section.
+
+**Why:** "the transaction committed" and "the operation did what it claimed"
+are different questions, and only the first was ever checked. See
+`docs/architecture.md`'s three-verification-levels section and its "Measured
+traps" for the two real silent-failure mechanisms this closes.
 
 ---
 

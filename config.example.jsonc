@@ -1,7 +1,9 @@
 // Copy to config.jsonc and edit. Nothing reads this file automatically — it is
-// the single place that documents the two installation-specific values. The
-// installer (scripts/install.ps1) can take them as parameters and substitute
-// them into the installed skill/agent copies for you.
+// the single place that documents the three installation-specific values.
+// Only tracking_data_dir has a matching installer parameter today
+// (scripts/install.ps1 -TrackingDataDir, substituted into the installed
+// skill/agent copies); tracker_dir and revit_port are env-var-only overrides
+// (REVIT_TRACKER_DIR / REVIT_PORT) with no installer flag.
 {
   // Absolute path to a directory you can browse, where the tracker writes all
   // per-project data (snapshots, deltas, journal, state). Keep it OUTSIDE this
