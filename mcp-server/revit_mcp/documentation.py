@@ -4,7 +4,7 @@ Documentation Module for Revit MCP
 Handles sheet creation, schedule creation, and document export
 """
 
-from utils import get_element_name, get_element_id_value, suppress_warnings, repair_hebrew_in, commit_verified, verify_created_elements
+from utils import get_element_name, get_element_id_value, suppress_warnings, repair_hebrew_in, commit_verified, verify_created_elements, verify_file_written
 from pyrevit import routes, revit, DB
 import json
 import traceback
@@ -98,7 +98,7 @@ def register_documentation_routes(api):
                     new_sheet.Name = sheet_name
 
                 tx_ok, tx_status = commit_verified(t)
-                if not tx_ok:
+                if tx_ok is False:
                     return routes.make_response(
                         data={
                             "status": "error",
@@ -242,7 +242,7 @@ def register_documentation_routes(api):
                     pass
 
                 tx_ok, tx_status = commit_verified(t)
-                if not tx_ok:
+                if tx_ok is False:
                     return routes.make_response(
                         data={
                             "status": "error",
@@ -465,7 +465,7 @@ def register_documentation_routes(api):
                         )
 
                 tx_ok, tx_status = commit_verified(t)
-                if not tx_ok:
+                if tx_ok is False:
                     return routes.make_response(
                         data={
                             "status": "error",
@@ -476,28 +476,17 @@ def register_documentation_routes(api):
                         status=500,
                     )
 
-                # Get file size
-                file_exists = False
-                try:
-                    file_exists = bool(file_path) and os.path.exists(file_path)
-                    if file_exists:
-                        file_size_kb = int(os.path.getsize(file_path) / 1024)
-                except Exception:
-                    pass
-
                 # Level 2: this operation's real product is a file on disk,
                 # not model state - tx_status being Committed says nothing
                 # about whether Revit's export API actually wrote the file.
                 # Previously file_size_kb could silently read 0 with no
                 # failure signal at all if the export produced nothing.
-                verified = {
-                    "ok": file_exists and file_size_kb > 0,
-                    "method": "file_exists",
-                    "expected": {"file_path": file_path},
-                    "actual": {"exists": file_exists, "size_kb": file_size_kb},
-                }
-                if not verified["ok"]:
-                    verified["reason"] = "Export reported success but the output file does not exist or is empty"
+                # min_bytes=1024 preserves this route's original
+                # "size_kb > 0" threshold. file_size_kb (used below, outside
+                # verification, for the response body/message) is read back
+                # from the same computation rather than done twice.
+                verified = verify_file_written(file_path, min_bytes=1024)
+                file_size_kb = verified["actual"]["size_kb"]
 
                 return routes.make_response(
                     data={

@@ -18,7 +18,7 @@ them and do not rely on them as current state.
 Append-only. One JSON line per event, UTF-8, no blank lines.
 
 ```json
-{"n":10,"ts":"2026-08-23T14:02","by":"claude","run":"r-20260823-140201-4c1a","intent":"user asked for 4 furnished residential floors","did":"created levels 19800/23100/26400 + roof 29700; 33 walls & 24 rooms per floor","why":"identical mirrored-apartment plan around central core","ids":{"levels":[1385553,1385564],"floors":[1385599]},"counts":{"el":867,"saves":7},"diff":{"a":725,"m":1,"d":0},"attr":{"claude":726},"tx":["Create 4 levels, plan views"],"delta":"deltas/d-20260818104502.json","lesson":"family insertion point sits at the back, not center","notes":[]}
+{"n":10,"ts":"2026-08-23T14:02","by":"claude","run":"r-20260823-140201-4c1a","intent":"user asked for 4 furnished residential floors","did":"created levels 19800/23100/26400 + roof 29700; 33 walls & 24 rooms per floor","why":"identical mirrored-apartment plan around central core","ids":{"levels":[1385553,1385564],"floors":[1385599]},"counts":{"el":867,"saves":7},"diff":{"a":725,"m":1,"d":0},"attr":{"claude":726},"tx":["Create 4 levels, plan views"],"delta":"deltas/d-20260818104502.json","lesson":"family insertion point sits at the back, not center","notes":[],"expected":"4 levels + roof, furnished per floor","verified":[{"tool":"create_level","tx_status":"Committed","ok":true,"method":"element_category"}],"outcome":"match"}
 ```
 
 | Field | Required | Source | Note |
@@ -38,6 +38,36 @@ Append-only. One JSON line per event, UTF-8, no blank lines.
 | `delta` | yes | `result.delta_file` | path **relative** to `instance_dir` |
 | `lesson` | no | the scribe | an insight we caught ourselves |
 | `notes` | yes | the queue item | empty ⇒ `[]` |
+| `expected` | no | the queue item's `expected`, verbatim | a **claim** by the main thread, not a fact — see below |
+| `verified` | no | the queue item's `verified`, verbatim | level-1/level-2 evidence from tool responses — a **claim**, not a fact |
+| `outcome` | no | computed by the scribe | `match` \| `mismatch` \| `unverified` — see below |
+
+### `expected` / `verified` / `outcome` — claims, not facts
+
+These three fields are **new**, added alongside the three-level verification
+layer (see `docs/architecture.md`). Before this, all three levels computed
+evidence on every call and none of it was ever kept — the journal knew *what*
+changed and never knew whether that was what was actually intended.
+
+**The distinction is critical and must not be blurred:**
+
+- `expected`/`verified` are **claims made by the main thread** — what it
+  predicted before executing, and what the tools themselves reported while
+  executing. The scribe **copies them verbatim**, **never invents or
+  corrects them**, exactly like `user_intent`.
+- `did`/`diff`/`attr` remain **observed fact**, derived only from the delta —
+  the existing rule ("the delta file is the source of truth for every fact")
+  is unchanged.
+- `outcome` is the one field of the three the scribe actually **computes**
+  rather than copies: it compares `expected` (the claim) against the delta
+  (the fact) and records `match` when they agree, `mismatch` when they don't,
+  or `unverified` when no `expected` was supplied. **Never reconcile a
+  contradiction** — a mismatch is recorded as exactly that, not silently
+  smoothed over.
+
+A queue item with no `expected` field ⇒ both `expected` and `verified` are
+absent from the record, and `outcome` is `unverified`. That is normal, not an
+error — not every checkpoint carries a prediction.
 
 ### `by` and `attr` — the rule that does not change
 

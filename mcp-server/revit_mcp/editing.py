@@ -75,7 +75,7 @@ def register_editing_routes(api):
                                 cascaded_ids.append(del_id_int)
 
                 tx_ok, tx_status = commit_verified(t)
-                if not tx_ok:
+                if tx_ok is False:
                     return routes.make_response(
                         data={
                             "status": "error",
@@ -257,7 +257,7 @@ def register_editing_routes(api):
                         })
 
                 tx_ok, tx_status = commit_verified(t)
-                if not tx_ok:
+                if tx_ok is False:
                     return routes.make_response(
                         data={
                             "status": "error",

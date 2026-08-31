@@ -233,6 +233,26 @@ limits : create_mep_system's "rename an existing system" path and "create
          system actually contains the requested elements' connectors.
 ```
 
+### `set_active_view` (`view_management.py`)
+
+```
+pre    : view_name must resolve to a non-template view in the model
+tx     : none - uidoc.ActiveView is UI state, not a DB.Transaction, so
+         there is no tx_ok/tx_status for this route at all
+post   : uidoc.ActiveView, re-read after assignment, actually matches the
+         requested view's id
+method : active_view_matches
+limits : previously this route had no post-condition at all and reported
+         success unconditionally regardless of whether the assignment took
+         effect - closed as part of the M1-M5 architecture upgrade's M3
+         (see that upgrade's D6 finding). A verification failure here
+         still returns HTTP 200/status "success" (the assignment statement
+         itself did not raise) with verified.ok: false - consistent with
+         every other create_*/route in this matrix, where tx_ok (or here,
+         a raised exception) governs the HTTP status and verified.ok is a
+         separate signal.
+```
+
 ### `create_sheet` / `create_schedule` (`documentation.py`)
 
 ```

@@ -4,7 +4,7 @@ Transforms Module for Revit MCP
 Handles move, copy, rotate, and mirror operations on elements
 """
 
-from utils import get_element_id_value, make_element_id, suppress_warnings, repair_hebrew_in, commit_verified
+from utils import get_element_id_value, make_element_id, suppress_warnings, repair_hebrew_in, commit_verified, verify_elements_exist
 from pyrevit import routes, revit, DB
 from System.Collections.Generic import List
 import json
@@ -222,7 +222,7 @@ def register_transform_routes(api):
                 # (see the level-2 post-condition below).
                 tx_ok, tx_status = commit_verified(t)
 
-                if not tx_ok:
+                if tx_ok is False:
                     return routes.make_response(
                         data={
                             "status": "error",
@@ -270,15 +270,7 @@ def register_transform_routes(api):
                     if failures:
                         verified["failures"] = failures[:50]
                 elif operation == "copy" and new_element_ids:
-                    missing = [nid for nid in new_element_ids if doc.GetElement(make_element_id(nid)) is None]
-                    verified = {
-                        "ok": len(missing) == 0,
-                        "method": "element_exists",
-                        "expected": {"count": len(new_element_ids)},
-                        "actual": {"count_ok": len(new_element_ids) - len(missing)},
-                    }
-                    if missing:
-                        verified["failures"] = [{"id": nid} for nid in missing[:50]]
+                    verified = verify_elements_exist(doc, new_element_ids)
                 else:
                     verified = {
                         "ok": None,

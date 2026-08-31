@@ -4,7 +4,7 @@ Annotation Module for Revit MCP
 Handles dimensions and wall tagging
 """
 
-from utils import get_element_name, get_element_id_value, make_element_id, suppress_warnings, repair_hebrew_in, commit_verified
+from utils import get_element_name, get_element_id_value, make_element_id, suppress_warnings, repair_hebrew_in, commit_verified, verify_elements_exist
 from pyrevit import routes, revit, DB
 import json
 import traceback
@@ -183,7 +183,7 @@ def register_annotation_routes(api):
                     })
 
                 tx_ok, tx_status = commit_verified(t)
-                if not tx_ok:
+                if tx_ok is False:
                     return routes.make_response(
                         data={
                             "status": "error",
@@ -194,18 +194,10 @@ def register_annotation_routes(api):
                         status=500,
                     )
 
-                still_exists = [c["id"] for c in created if doc.GetElement(DB.ElementId(c["id"])) is None]
-                verified = {
-                    "ok": len(still_exists) == 0 if created else None,
-                    "method": "element_exists",
-                    "expected": {"count": len(created)},
-                    "actual": {"count_ok": len(created) - len(still_exists)},
-                }
-                if not created:
-                    verified["status"] = "not_checked"
-                    verified["reason"] = "No dimension was created"
-                if still_exists:
-                    verified["failures"] = [{"id": i} for i in still_exists]
+                verified = verify_elements_exist(
+                    doc, [c["id"] for c in created],
+                    empty_reason="No dimension was created",
+                )
 
                 message = "Created {} dimension annotation{} in the current view".format(
                     len(created),
@@ -325,6 +317,7 @@ def register_annotation_routes(api):
                 tags_placed = 0
                 walls_already_tagged = 0
                 skipped = []
+                tag_ids = []
 
                 # Activate tag symbol
                 if not target_tag.IsActive:
@@ -364,6 +357,7 @@ def register_annotation_routes(api):
 
                         if tag:
                             tags_placed += 1
+                            tag_ids.append(get_element_id_value(tag))
                         else:
                             skipped.append({
                                 "wall_id": wall_id_val,
@@ -380,7 +374,7 @@ def register_annotation_routes(api):
                         continue
 
                 tx_ok, tx_status = commit_verified(t)
-                if not tx_ok:
+                if tx_ok is False:
                     return routes.make_response(
                         data={
                             "status": "error",
@@ -400,13 +394,25 @@ def register_annotation_routes(api):
                     walls_total,
                 )
 
+                # Level 2: previously missing entirely, despite
+                # docs/operation-contracts.md already claiming this route
+                # had an element_exists check - see the M1-M5 architecture
+                # upgrade's D6/M3. If every wall in view was already
+                # tagged, tag_ids is legitimately empty and this correctly
+                # reads not_checked, not a false pass.
+                verified = verify_elements_exist(
+                    doc, tag_ids, empty_reason="No tag was created (walls may already be tagged)"
+                )
+
                 response_data = {
                     "status": "success",
                     "tags_placed": tags_placed,
                     "walls_already_tagged": walls_already_tagged,
                     "walls_total": walls_total,
+                    "tag_ids": tag_ids,
                     "tx_status": tx_status,
                     "tx_ok": tx_ok,
+                    "verified": verified,
                     "message": message,
                 }
                 if skipped:

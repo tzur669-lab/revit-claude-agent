@@ -105,7 +105,7 @@ def register_room_routes(api):
                         number_param.Set(room_number)
 
                 tx_ok, tx_status = commit_verified(t)
-                if not tx_ok:
+                if tx_ok is False:
                     return routes.make_response(
                         data={
                             "status": "error",
@@ -302,7 +302,7 @@ def register_room_routes(api):
                         created_ids.append(get_element_id_value(elem))
 
                 tx_ok, tx_status = commit_verified(t)
-                if not tx_ok:
+                if tx_ok is False:
                     return routes.make_response(
                         data={
                             "status": "error",

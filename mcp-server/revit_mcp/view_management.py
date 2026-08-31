@@ -4,7 +4,7 @@ View Management Module for Revit MCP
 Handles view creation and active view switching
 """
 
-from utils import get_element_name, get_element_id_value, suppress_warnings, repair_hebrew_in, commit_verified
+from utils import get_element_name, get_element_id_value, suppress_warnings, repair_hebrew_in, commit_verified, verify_element_named
 from pyrevit import routes, revit, DB
 import json
 import traceback
@@ -275,7 +275,7 @@ def register_view_management_routes(api):
                     new_view.Name = name
 
                 tx_ok, tx_status = commit_verified(t)
-                if not tx_ok:
+                if tx_ok is False:
                     return routes.make_response(
                         data={
                             "status": "error",
@@ -299,21 +299,12 @@ def register_view_management_routes(api):
                 # documented uniqueness/rejection path here, but re-reading
                 # rather than assuming is the whole point of this milestone.
                 actual_name = ""
-                name_matches = None
                 if view_after is not None:
                     try:
                         actual_name = get_element_name(view_after)
-                        name_matches = (actual_name == name)
                     except Exception:
                         pass
-                verified = {
-                    "ok": (view_after is not None) and bool(name_matches),
-                    "method": "element_exists_and_name",
-                    "expected": {"name": name},
-                    "actual": {"name": actual_name, "resolves": view_after is not None},
-                }
-                if not verified["ok"]:
-                    verified["reason"] = "View does not resolve or its name does not match what was requested"
+                verified = verify_element_named(view_after, name, actual_name, subject="View")
 
                 return routes.make_response(
                     data={
@@ -389,12 +380,38 @@ def register_view_management_routes(api):
 
             uidoc.ActiveView = target_view
 
+            # Level 2: re-read uidoc.ActiveView rather than assume the
+            # assignment took effect - previously this route reported
+            # success unconditionally with no post-condition at all (see
+            # the M1-M5 architecture upgrade's D6/M3). No transaction is
+            # involved here (uidoc.ActiveView is UI state, not a
+            # DB.Transaction), so there is no tx_ok - this is the only
+            # signal for whether the switch actually happened.
+            active_after = uidoc.ActiveView
+            target_view_id = get_element_id_value(target_view)
+            active_matches = (
+                active_after is not None
+                and get_element_id_value(active_after) == target_view_id
+            )
+            verified = {
+                "ok": active_matches,
+                "method": "active_view_matches",
+                "expected": {"view_id": target_view_id, "name": view_name},
+                "actual": {
+                    "view_id": get_element_id_value(active_after) if active_after is not None else None,
+                    "name": get_element_name(active_after) if active_after is not None else None,
+                },
+            }
+            if not active_matches:
+                verified["reason"] = "uidoc.ActiveView does not match the requested view after assignment"
+
             return routes.make_response(
                 data={
                     "status": "success",
-                    "view_id": get_element_id_value(target_view),
+                    "view_id": target_view_id,
                     "name": view_name,
                     "view_type": str(target_view.ViewType),
+                    "verified": verified,
                     "message": "Switched to view '{}'".format(view_name),
                 }
             )

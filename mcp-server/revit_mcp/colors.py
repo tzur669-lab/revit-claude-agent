@@ -862,7 +862,7 @@ def color_elements_by_parameter(
 
             tx_ok, tx_status = commit_verified(t)
 
-        if not tx_ok:
+        if tx_ok is False:
             return {
                 "status": "error",
                 "tx_status": tx_status,
@@ -995,7 +995,7 @@ def clear_element_colors(doc, category_name):
 
             tx_ok, tx_status = commit_verified(t)
 
-        if not tx_ok:
+        if tx_ok is False:
             return {
                 "status": "error",
                 "tx_status": tx_status,

@@ -281,7 +281,7 @@ def register_parameter_routes(api):
                     param.Set(make_element_id(value))
 
                 tx_ok, tx_status = commit_verified(t)
-                if not tx_ok:
+                if tx_ok is False:
                     return routes.make_response(
                         data={
                             "status": "error",

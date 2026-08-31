@@ -4,7 +4,7 @@ MEP Module for Revit MCP
 Handles duct, pipe, and MEP system creation
 """
 
-from utils import get_element_name, get_element_id_value, make_element_id, suppress_warnings, repair_hebrew_in, commit_verified, verify_created_elements
+from utils import get_element_name, get_element_id_value, make_element_id, suppress_warnings, repair_hebrew_in, commit_verified, verify_created_elements, verify_element_named
 from pyrevit import routes, revit, DB
 import json
 import traceback
@@ -161,7 +161,7 @@ def register_mep_routes(api):
                         h_param.Set(float(height) * MM_TO_FEET)
 
                 tx_ok, tx_status = commit_verified(t)
-                if not tx_ok:
+                if tx_ok is False:
                     return routes.make_response(
                         data={
                             "status": "error",
@@ -329,7 +329,7 @@ def register_mep_routes(api):
                         d_param.Set(float(diameter) * MM_TO_FEET)
 
                 tx_ok, tx_status = commit_verified(t)
-                if not tx_ok:
+                if tx_ok is False:
                     return routes.make_response(
                         data={
                             "status": "error",
@@ -506,7 +506,7 @@ def register_mep_routes(api):
                         name_param.Set(system_name)
 
                 tx_ok, tx_status = commit_verified(t)
-                if not tx_ok:
+                if tx_ok is False:
                     return routes.make_response(
                         data={
                             "status": "error",
@@ -530,14 +530,9 @@ def register_mep_routes(api):
                                 actual_name = np.AsString() or ""
                         except Exception:
                             pass
-                    verified = {
-                        "ok": (system_after is not None) and (actual_name == system_name),
-                        "method": "element_exists_and_name",
-                        "expected": {"name": system_name},
-                        "actual": {"name": actual_name, "resolves": system_after is not None},
-                    }
-                    if not verified["ok"]:
-                        verified["reason"] = "System does not resolve or its name does not match what was requested"
+                    verified = verify_element_named(
+                        system_after, system_name, actual_name, subject="System"
+                    )
 
                     return routes.make_response(
                         data={

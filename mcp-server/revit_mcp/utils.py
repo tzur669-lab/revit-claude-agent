@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 from pyrevit import DB
+import os
 import traceback
 import logging
 
@@ -171,6 +172,132 @@ def verify_created_elements(doc, id_category_pairs):
     if failures:
         verified["failures"] = failures[:50]
     return verified
+
+
+def verified_ok(method, expected, actual):
+    """Build the passing shape of the documented `verified` dict - see
+    docs/operation-contracts.md. One place these three shapes are
+    constructed, instead of each handler assembling the dict literal by
+    hand (characterized and consolidated from 8 near-identical inline
+    blocks across annotation.py, tags.py, interop.py (x2), transforms.py,
+    mep.py, view_management.py, documentation.py)."""
+    return {"ok": True, "method": method, "expected": expected, "actual": actual}
+
+
+def verified_failed(method, expected, actual, reason=None, failures=None):
+    """The failing shape. `failures`, when given, is capped at 50 items -
+    matching verify_created_elements's own convention above, so a huge
+    failed batch cannot bloat a response unboundedly."""
+    v = {"ok": False, "method": method, "expected": expected, "actual": actual}
+    if reason:
+        v["reason"] = reason
+    if failures:
+        v["failures"] = failures[:50]
+    return v
+
+
+def verified_not_checked(reason):
+    """The not_checked shape - ok is None, never True or False. Used when
+    there was nothing to check (an empty batch) or no fixed contract
+    applies (execute_revit_code, color_splash/clear_colors)."""
+    return {"ok": None, "status": "not_checked", "reason": reason}
+
+
+def verify_elements_exist(doc, ids, empty_reason="Nothing to verify - empty id list"):
+    """Level-2 post-condition: every id in a batch still resolves. Shared
+    by annotation.py (create_dimensions), tags.py (tag_elements),
+    interop.py (link_file's single-id case, ids=[id]), and
+    transforms.py (transform_elements's copy branch) - characterized from
+    those four near-identical inline blocks, which agreed on every
+    observable field except two: whether an empty id list means ok=None
+    (three of four sites) or a vacuous ok=True (transforms.py's copy
+    branch - though that branch's own `and new_element_ids` guard means
+    ids is never actually empty when reached, so this is not an observable
+    behavior change there), and whether failures was capped at 50
+    (transforms.py already did; the batch sites in annotation.py/tags.py
+    did not - capped here for all callers, consistent with
+    verify_created_elements above).
+
+    empty_reason lets each caller keep its own original wording ("No
+    dimension was created" vs "No tag was created") for the empty-batch
+    case instead of a generic message.
+
+    Uses make_element_id (not a bare DB.ElementId(int)) since that is this
+    codebase's own documented Revit-2027-safe pattern (see
+    code_execution.py's comment on the same ambiguity) - three of the four
+    original inline blocks used the bare form; unified here rather than
+    left inconsistent."""
+    if not ids:
+        return verified_not_checked(empty_reason)
+    still_missing = [i for i in ids if doc.GetElement(make_element_id(i)) is None]
+    expected = {"count": len(ids)}
+    actual = {"count_ok": len(ids) - len(still_missing)}
+    if still_missing:
+        return verified_failed(
+            "element_exists", expected, actual,
+            failures=[{"id": i} for i in still_missing],
+        )
+    return verified_ok("element_exists", expected, actual)
+
+
+def verify_element_named(element, expected_name, actual_name, subject="Element"):
+    """Level-2 post-condition: a single element resolves AND carries the
+    name it was requested to have. Shared by mep.py (create_mep_system) and
+    view_management.py (create_view) - characterized from those two
+    near-identical inline blocks. Each site keeps its own way of resolving
+    `element` and reading `actual_name` (mep.py reads a "System Name"/
+    "Comments" parameter; view_management.py uses get_element_name) since
+    that difference is a real, intentional per-element-type distinction,
+    not duplication - only the ok/expected/actual/reason assembly was
+    actually duplicated.
+
+    `subject` customizes the reason text ("System does not resolve..." vs
+    "View does not resolve...") to match each site's original wording."""
+    resolves = element is not None
+    matches = bool(resolves and actual_name == expected_name)
+    expected = {"name": expected_name}
+    actual = {"name": actual_name, "resolves": resolves}
+    if matches:
+        return verified_ok("element_exists_and_name", expected, actual)
+    return verified_failed(
+        "element_exists_and_name", expected, actual,
+        reason="{} does not resolve or its name does not match what was requested".format(subject),
+    )
+
+
+def verify_file_written(file_path, min_bytes=1):
+    """Level-2 post-condition for operations whose real product is a file
+    on disk, not model state (tx_status Committed says nothing about
+    whether Revit's export/save API actually wrote anything). Shared by
+    documentation.py (export_document) and interop.py (export_ifc) -
+    characterized from those two near-identical inline blocks, both
+    checked against a "size_kb > 0" threshold (i.e. at least 1024 bytes,
+    after KB truncation) - both callers pass min_bytes=1024 explicitly to
+    preserve that exact existing threshold; a new caller wanting a
+    stricter/looser check can pass its own.
+
+    documentation.py's original guarded `bool(file_path) and
+    os.path.exists(...)`; interop.py's did not (a None file_path would
+    have raised inside the try/except Exception: pass, silently reporting
+    not-exists rather than raising - so behaviourally equivalent already,
+    just made explicit here for both callers)."""
+    exists = False
+    size_bytes = 0
+    try:
+        exists = bool(file_path) and os.path.exists(file_path)
+        if exists:
+            size_bytes = os.path.getsize(file_path)
+    except Exception:
+        pass
+    size_kb = int(size_bytes / 1024)
+    expected = {"file_path": file_path}
+    actual = {"exists": exists, "size_kb": size_kb}
+    if exists and size_bytes >= min_bytes:
+        return verified_ok("file_exists", expected, actual)
+    return verified_failed(
+        "file_exists", expected, actual,
+        reason="Export reported success but the output file does not exist or is empty",
+    )
 
 
 def _to_text(value):

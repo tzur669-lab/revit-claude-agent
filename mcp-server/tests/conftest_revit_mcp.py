@@ -247,9 +247,22 @@ class FakeDoc(object):
     handler functions read before they would need a real
     FilteredElementCollector (which stays unfaked, per this project's own
     mocking-strategy note in test_validation_helpers.py: DB-collection
-    behaviour is proven live, not re-shimmed offline)."""
-    def __init__(self, categories):
-        self.Settings = FakeSettings(categories)
+    behaviour is proven live, not re-shimmed offline).
+
+    GetElement(eid) supports the verify_elements_exist characterization
+    tests: pass existing_ids (an iterable of ints) and GetElement returns a
+    truthy sentinel for those, None for anything else - exactly the
+    "resolves or not" distinction those helpers check, without needing a
+    real Element object."""
+    def __init__(self, categories=None, existing_ids=()):
+        self.Settings = FakeSettings(categories or [])
+        self._existing_ids = set(int(i) for i in existing_ids)
+
+    def GetElement(self, eid):
+        value = eid.Value if hasattr(eid, "Value") else eid
+        if int(value) in self._existing_ids:
+            return object()
+        return None
 
 
 class FakeAPI(object):

@@ -30,13 +30,47 @@ Write to `.tmp` then rename, so a partial item is never read as valid.
   "counts": {"elements": 142},
   "notes": [],
   "saves": 5,
-  "user_intent": "user asked for plan views on the three new levels; created via execute_revit_code following the existing level's template."
+  "user_intent": "user asked for plan views on the three new levels; created via execute_revit_code following the existing level's template.",
+  "expected": "3 plan views, one per new level, named to match the level",
+  "verified": [
+    {"tool": "create_view", "tx_status": "Committed", "ok": true, "method": "element_exists_and_name"},
+    {"tool": "create_view", "tx_status": "Committed", "ok": true, "method": "element_exists_and_name"},
+    {"tool": "create_view", "tx_status": "Committed", "ok": true, "method": "element_exists_and_name"}
+  ]
 }
 ```
 
 `delta_file` is `result.delta_file` verbatim. `counts`, `notes` and `saves` are
 copied from `last_run.json` — they do **not** exist in the delta file, so they
 must pass through here.
+
+## `expected` and `verified` — both optional, both claims
+
+Two more fields the delta cannot supply, because they are not facts about the
+model — they are the main thread's own claims, made **before** (`expected`)
+and observed **during** (`verified`) execution:
+
+- **`expected`** — a short, free-text prediction of what this batch of work
+  should produce, written **before** running the tool calls, not reconstructed
+  afterward from what happened. One sentence is enough. Skip it for pure
+  read-only/investigation checkpoints — there is nothing to predict.
+- **`verified`** — the level-1/level-2 evidence the tool calls themselves
+  already returned (`tx_status`, `verified.ok`, `verified.method` from each
+  response — see `docs/operation-contracts.md` for what a route's `verified`
+  shape means). One entry per mutating tool call in the batch, in order. This
+  is **not** a re-derivation — copy the fields straight out of what the tool
+  already reported; do not re-check anything.
+
+Both are optional because not every checkpoint has a prediction worth stating,
+or mutating calls to report on. Neither is a substitute for `user_intent`,
+which stays required.
+
+**Why these live here and not in the delta:** the delta file only ever knows
+what changed in the model. It cannot know what the agent *predicted* would
+change, or what a tool's own response claimed about itself in the moment —
+both are gone the instant the next MCP call overwrites them, unless captured
+here. The scribe compares `expected` against the delta to compute the
+journal's `outcome` field — see `project-log-format.md`.
 
 **Do not copy `diff` or `attribution` here.** Both are already inside the delta,
 at the individual-element level and not just as a summary. Copying them by hand
@@ -46,7 +80,9 @@ while the delta and `last_run.json` said `claude: 1, unknown: 1`. The error was
 in the copy, and the scribe caught it only because it cross-checks against the delta.
 
 **The delta file is the source of truth for every fact about the change.** The
-item adds only what the delta does not know: the intent, and the three scalars above.
+item adds only what the delta does not know: the intent, the three scalars
+above, and — optionally — what was predicted and what the tool calls
+themselves reported (`expected`/`verified` below).
 
 **No need to copy `last_run.json` itself** — that way there is no risk it gets
 overwritten before the scribe reads it.

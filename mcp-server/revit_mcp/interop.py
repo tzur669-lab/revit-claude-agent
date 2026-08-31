@@ -4,7 +4,7 @@ Interop Module for Revit MCP
 Handles IFC export and external file linking/importing
 """
 
-from utils import get_element_name, get_element_id_value, suppress_warnings, repair_hebrew_in, commit_verified
+from utils import get_element_name, get_element_id_value, suppress_warnings, repair_hebrew_in, commit_verified, verify_elements_exist, verify_file_written
 from pyrevit import routes, revit, DB
 import clr
 import json
@@ -101,7 +101,7 @@ def register_interop_routes(api):
                     t.RollBack()
                 raise tx_error
 
-            if not tx_ok:
+            if tx_ok is False:
                 return routes.make_response(
                     data={
                         "status": "error",
@@ -112,27 +112,11 @@ def register_interop_routes(api):
                     status=500,
                 )
 
-            # Get file size
-            file_exists = False
-            file_size_kb = 0
-            try:
-                file_exists = os.path.exists(file_path)
-                if file_exists:
-                    file_size_kb = int(os.path.getsize(file_path) / 1024)
-            except Exception:
-                pass
-
             # Level 2: this operation's real product is a file on disk, not
             # model state - tx_status Committed says nothing about whether
-            # doc.Export actually wrote the IFC file.
-            verified = {
-                "ok": file_exists and file_size_kb > 0,
-                "method": "file_exists",
-                "expected": {"file_path": file_path},
-                "actual": {"exists": file_exists, "size_kb": file_size_kb},
-            }
-            if not verified["ok"]:
-                verified["reason"] = "Export reported success but the output file does not exist or is empty"
+            # doc.Export actually wrote the IFC file. min_bytes=1024
+            # preserves this route's original "size_kb > 0" threshold.
+            verified = verify_file_written(file_path, min_bytes=1024)
 
             return routes.make_response(
                 data={
@@ -245,7 +229,7 @@ def register_interop_routes(api):
                     )
 
                 tx_ok, tx_status = commit_verified(t)
-                if not tx_ok:
+                if tx_ok is False:
                     return routes.make_response(
                         data={
                             "status": "error",
@@ -257,15 +241,7 @@ def register_interop_routes(api):
                     )
 
                 if result_id is not None:
-                    resolves = doc.GetElement(DB.ElementId(result_id)) is not None
-                    verified = {
-                        "ok": resolves,
-                        "method": "element_exists",
-                        "expected": {"count": 1},
-                        "actual": {"count_ok": 1 if resolves else 0},
-                    }
-                    if not resolves:
-                        verified["failures"] = [{"id": result_id}]
+                    verified = verify_elements_exist(doc, [result_id])
                 else:
                     verified = {
                         "ok": None,

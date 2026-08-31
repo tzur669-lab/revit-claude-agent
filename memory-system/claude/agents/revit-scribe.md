@@ -51,11 +51,12 @@ For each item, in order:
 1. `Read` the item. Missing `user_intent` or `delta_file` ⇒ **reject**: move to `writeups/done/` with a `.rejected` suffix and note it in the closing summary. Never invent a record.
 2. `Read` `delta_file` - it holds full `items`, per-element `attribution`, and `transactions`. If `extra_delta_files` is present, read those too.
 
-**The delta file is the source of truth for every fact about the change.** The item contributes only what the delta doesn't know: intent, and the three scalars (`counts`, `notes`, `saves`). If the item contradicts the delta - **the delta wins**, and note the mismatch in the returned summary. Measured once: an item was written with `"claude": 2, "unknown": 0"` while the delta and `last_run.json` said `claude: 1, unknown: 1`; a manual-copy error, caught only because it was cross-checked against the delta.
+**The delta file is the source of truth for every fact about the change.** The item contributes only what the delta doesn't know: intent, the three scalars (`counts`, `notes`, `saves`), and - when present - `expected`/`verified`. If the item contradicts the delta - **the delta wins**, and note the mismatch in the returned summary. Measured once: an item was written with `"claude": 2, "unknown": 0"` while the delta and `last_run.json` said `claude: 1, unknown: 1`; a manual-copy error, caught only because it was cross-checked against the delta.
 
 3. Compute `n = max(state.last_n, n of the last valid journal line) + 1`.
-4. Append one record to `journal.ndjson` per the schema in `project-log-format.md`. Write via heredoc, then verify the line parses (`json.loads` on the last line) before moving on. Line fails to parse ⇒ remove it and rewrite, don't move to the next item.
-5. `mv` the item to `writeups/done/`.
+4. If the item carries `expected`: compute `outcome` by comparing that claim against what the delta actually shows (`match`/`mismatch`). No `expected` ⇒ `outcome: "unverified"`, and both `expected`/`verified` are simply omitted from the record. **Copy `expected` and `verified` verbatim - never invent or correct them, and never resolve a mismatch by editing either side.** They are the main thread's claims, not facts this agent is qualified to adjust; only `outcome` is this agent's own computed judgement, and it must be honest about disagreement, not smoothed over.
+5. Append one record to `journal.ndjson` per the schema in `project-log-format.md`. Write via heredoc, then verify the line parses (`json.loads` on the last line) before moving on. Line fails to parse ⇒ remove it and rewrite, don't move to the next item.
+6. `mv` the item to `writeups/done/`.
 
 **Check the queue again before exiting** - a new item may have landed while writing. Loop until the queue is empty.
 

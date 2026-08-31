@@ -146,7 +146,7 @@ TOOLS = {
 
     # -- annotation_tools.py ------------------------------------------------
     "create_dimensions": _entry("documentation", "additive", True, "documented"),
-    "tag_walls": _entry("editing", "additive", True, "known_gap:commit_verified is called but no verified key is emitted and created tag ids are never captured, though operation-contracts.md claims an element_exists check - see the M1-M5 upgrade's D6, closed in M3"),
+    "tag_walls": _entry("editing", "additive", True, "documented"),
 
     # -- analysis_tools.py --------------------------------------------------
     "ai_element_filter": _entry("analysis", "read", False, "read_only"),
@@ -165,7 +165,7 @@ TOOLS = {
 
     # -- view_management_tools.py --------------------------------------
     "create_view": _entry("creation", "additive", True, "documented"),
-    "set_active_view": _entry("editing", "modifying", True, "known_gap:mutates uidoc.ActiveView and never re-reads it to confirm; absent from operation-contracts.md and from its out-of-scope list - see the M1-M5 upgrade's D6, closed in M3"),
+    "set_active_view": _entry("editing", "modifying", True, "documented"),
 
     # -- tag_tools.py -----------------------------------------------------
     "tag_elements": _entry("editing", "additive", True, "documented"),

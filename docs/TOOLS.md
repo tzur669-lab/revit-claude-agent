@@ -49,10 +49,10 @@
 | `color_splash` | Color elements in a category based on parameter values | `POST /color_splash/` | modifying | yes | documented |
 | `delete_elements` | Delete one or more elements from the Revit model. | `POST /delete_elements/` | destructive | yes | documented |
 | `modify_element` | Modify parameter values on a Revit element. | `POST /modify_element/` | modifying | yes | documented |
-| `set_active_view` | Switch the active view in Revit to the specified view. | `POST /set_active_view/` | modifying | yes | known_gap |
+| `set_active_view` | Switch the active view in Revit to the specified view. | `POST /set_active_view/` | modifying | yes | documented |
 | `set_parameter` | Set a single parameter value on a Revit element. | `POST /set_parameter/` | modifying | yes | documented |
 | `tag_elements` | Tag elements with annotation symbols in a view. | `POST /tag_elements/` | additive | yes | documented |
-| `tag_walls` | Tag all untagged walls in the current Revit view. | `POST /tag_walls/` | additive | yes | known_gap |
+| `tag_walls` | Tag all untagged walls in the current Revit view. | `POST /tag_walls/` | additive | yes | documented |
 | `transform_elements` | Move, copy, rotate, or mirror elements in the Revit model. | `POST /transform_elements/` | modifying | yes | documented |
 
 ## Analysis (8)

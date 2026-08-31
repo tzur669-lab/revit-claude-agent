@@ -4,7 +4,7 @@ Tags Module for Revit MCP
 Handles element tagging with annotation symbols
 """
 
-from utils import get_element_name, get_element_id_value, make_element_id, suppress_warnings, repair_hebrew_in, commit_verified
+from utils import get_element_name, get_element_id_value, make_element_id, suppress_warnings, repair_hebrew_in, commit_verified, verify_elements_exist
 from pyrevit import routes, revit, DB
 import json
 import traceback
@@ -219,7 +219,7 @@ def register_tag_routes(api):
                         })
 
                 tx_ok, tx_status = commit_verified(t)
-                if not tx_ok:
+                if tx_ok is False:
                     return routes.make_response(
                         data={
                             "status": "error",
@@ -230,18 +230,9 @@ def register_tag_routes(api):
                         status=500,
                     )
 
-                still_exists = [tid for tid in tagged_ids if doc.GetElement(DB.ElementId(tid)) is None]
-                verified = {
-                    "ok": len(still_exists) == 0 if tagged_ids else None,
-                    "method": "element_exists",
-                    "expected": {"count": len(tagged_ids)},
-                    "actual": {"count_ok": len(tagged_ids) - len(still_exists)},
-                }
-                if not tagged_ids:
-                    verified["status"] = "not_checked"
-                    verified["reason"] = "No tag was created"
-                if still_exists:
-                    verified["failures"] = [{"id": i} for i in still_exists]
+                verified = verify_elements_exist(
+                    doc, tagged_ids, empty_reason="No tag was created"
+                )
 
                 return routes.make_response(
                     data={

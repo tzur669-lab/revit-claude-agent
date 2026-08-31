@@ -128,7 +128,7 @@ def register_detail_routes(api):
                         logger.debug("Could not set line style: {}".format(str(style_err)))
 
                 tx_ok, tx_status = commit_verified(t)
-                if not tx_ok:
+                if tx_ok is False:
                     return routes.make_response(
                         data={
                             "status": "error",

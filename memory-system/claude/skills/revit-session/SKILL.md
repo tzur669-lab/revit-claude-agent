@@ -102,6 +102,16 @@ diff is not all zeros ⇒ a queue item. This applies to `session_start` exactly 
 to `checkpoint`. **Load `references/checkpoint-queue.md`** before the first item
 of the session.
 
+**State `expected` before executing a batch, not after.** Before running the
+tool calls for a batch worth predicting (skip this for pure investigation/
+read-only work), form one short sentence of what the batch should produce.
+While executing, note each mutating tool's own `tx_status`/`verified.ok`/
+`verified.method` from its response — this is what becomes `verified` in the
+queue item. Writing `expected` retroactively from what actually happened
+defeats its purpose: it exists to catch the gap between intent and outcome,
+not to restate the outcome. See `references/checkpoint-queue.md` for the
+exact fields and why they are optional.
+
 ## Correction from the user — write to RULES.md immediately
 
 The user says something you did was wrong, or approves a lesson you proposed —
