@@ -52,6 +52,41 @@ def has_notx_flag(code):
     return code.lstrip().startswith("#!notx")
 
 
+try:
+    _string_types = (str, unicode)
+except NameError:
+    _string_types = (str,)
+
+
+def _string_literal_value(node):
+    """Read a string literal AST node's value across both AST dialects this
+    module has to run under: CPython 3.8+ represents it as
+    ast.Constant(value=...), while IronPython 2.7's ast module has no
+    Constant type at all and instead uses the pre-3.8 ast.Str(s=...) node.
+    ast.Constant literally does not exist as an attribute under IronPython
+    - referencing it unconditionally (as this function used to do) raises
+    AttributeError, uncaught, from inside classify()'s AST walk - which
+    contradicts classify()'s own "NEVER raises" guarantee and, worse,
+    happens before the real code has even started executing, silently
+    blocking execution outright. Found live, 2026-09-01, by submitting a
+    script containing a plain `open(path, "w")` call through the real
+    IronPython route.
+
+    Matched by class name rather than `isinstance(node, ast.Constant)` so
+    this never touches the (possibly absent) ast.Constant attribute at
+    all. Returns None for anything that isn't a string literal in either
+    dialect, same as the "could not determine statically" case already
+    handled by this function's caller."""
+    cls_name = node.__class__.__name__
+    if cls_name == "Constant":
+        value = getattr(node, "value", None)
+        return value if isinstance(value, _string_types) else None
+    if cls_name == "Str":
+        value = getattr(node, "s", None)
+        return value if isinstance(value, _string_types) else None
+    return None
+
+
 def _open_call_is_write(node):
     """Best-effort read of open()'s mode argument. Returns True (write),
     False (read), or None (could not determine statically - e.g. the mode
@@ -66,8 +101,8 @@ def _open_call_is_write(node):
                 break
     if mode_arg is None:
         return False  # open(path) alone defaults to "r"
-    if isinstance(mode_arg, ast.Constant) and isinstance(mode_arg.value, str):
-        mode = mode_arg.value
+    mode = _string_literal_value(mode_arg)
+    if mode is not None:
         return any(marker in mode for marker in _WRITE_MODE_MARKERS)
     return None
 

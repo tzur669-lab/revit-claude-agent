@@ -16,6 +16,8 @@ Whether execution actually proceeds regardless of risk is proven
 separately in test_code_execution_never_blocks.py, against the real
 execute_code route handler.
 """
+import ast
+
 from conftest_revit_mcp import import_revit_mcp_module
 
 code_safety = import_revit_mcp_module("code_safety")
@@ -105,6 +107,62 @@ def test_doc_delete_is_destructive():
     risk, signals = code_safety.classify("doc.Delete(element_id)")
     assert risk == code_safety.RISK_DESTRUCTIVE
     assert any("Delete" in s for s in signals)
+
+
+# ---------------------------------------------------------------------------
+# _string_literal_value - cross-AST-dialect compatibility. Found live
+# against the real IronPython route, 2026-09-01: ast.Constant does not
+# exist under IronPython 2.7's ast module (it uses the pre-3.8 ast.Str
+# node instead), so referencing it unconditionally raised AttributeError
+# from inside classify()'s walk - uncaught, before the transaction even
+# started, silently blocking execution outright. CPython's ast.parse
+# never produces an ast.Str node (only ast.Constant), so the open()-mode
+# tests above never exercised this path and could not have caught it -
+# exactly the class of gap R5 (offline CPython proves parseability, not
+# IronPython compatibility) warned about. These tests fake only the node
+# shape _string_literal_value actually inspects, since a real IronPython
+# ast.Str instance is not constructible under CPython.
+# ---------------------------------------------------------------------------
+
+def test_open_write_mode_survives_python2_str_node_shape():
+    class Str(object):
+        def __init__(self, s):
+            self.s = s
+
+    assert code_safety._string_literal_value(Str("w")) == "w"
+
+
+def test_open_read_mode_survives_python2_str_node_shape():
+    class Str(object):
+        def __init__(self, s):
+            self.s = s
+
+    assert code_safety._string_literal_value(Str("r")) == "r"
+
+
+def test_non_string_constant_value_is_not_mistaken_for_a_mode():
+    """A Constant node whose value isn't a string (e.g. open(path, 0)) must
+    read as "could not determine", not raise and not match a mode marker
+    by accident."""
+    tree = ast.parse("open('x.txt', 0)")
+    mode_arg = tree.body[0].value.args[1]
+    assert code_safety._string_literal_value(mode_arg) is None
+
+
+def test_unrecognized_node_shape_returns_none_not_a_crash():
+    class SomethingElse(object):
+        pass
+
+    assert code_safety._string_literal_value(SomethingElse()) is None
+
+
+def test_classify_does_not_raise_on_open_call_even_if_ast_constant_were_absent():
+    """Regression proof for the actual failure mode: classify() must reach
+    a normal return, never propagate an exception, for code containing a
+    literal-mode open() call - this is precisely the shape that broke
+    live before the fix (see this section's banner comment)."""
+    risk, signals = code_safety.classify('f = open("x.txt", "w")\nf.write("x")\nf.close()')
+    assert risk == code_safety.RISK_DESTRUCTIVE
 
 
 # ---------------------------------------------------------------------------
