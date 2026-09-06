@@ -46,6 +46,77 @@ def _xyz_to_mm(pt):
     return {"x": pt.X / MM_TO_FEET, "y": pt.Y / MM_TO_FEET, "z": pt.Z / MM_TO_FEET}
 
 
+# ---------------------------------------------------------------------------
+# move_elements core -- transaction-agnostic, shared by the friendly route
+# above and revit_mcp/ops.py's dispatcher (the "move_elements" op). Each
+# caller owns its own transaction; nothing here calls Start()/Commit()/
+# RollBack(). Extracted with NO behaviour change from the route's own
+# former inline "move" branch, except one fix made while extracting: keying
+# by get_element_id_value(eid) instead of the raw eid.IntegerValue this
+# module previously used at three sites -- IntegerValue is the Revit
+# <=2023 accessor; get_element_id_value already handles both that and the
+# 2024+ .Value form, matching every other module in this package.
+# ---------------------------------------------------------------------------
+
+def capture_move_state(doc, elem_id_list):
+    """Pre-move state for the level-2 post-condition, and (unchanged) for
+    the op dispatcher's precondition/inverse: {int_id: XYZ} for every id
+    whose Location exposes a representative point. An id with no such
+    point is simply absent -- "no point captured" and "not checked" are
+    deliberately the same case, matching the route's original behaviour."""
+    pre = {}
+    for eid in elem_id_list:
+        elem = doc.GetElement(eid)
+        pt = _location_point(elem)
+        if pt is not None:
+            pre[get_element_id_value(eid)] = pt
+    return pre
+
+
+def apply_move(doc, elem_id_list, translation):
+    """DB.ElementTransformUtils.MoveElement per id. Assumes an open,
+    caller-owned transaction; never commits, never rolls back."""
+    for eid in elem_id_list:
+        DB.ElementTransformUtils.MoveElement(doc, eid, translation)
+
+
+def verify_move(doc, elem_id_list, translation, pre_move_points):
+    """The level-2 post-condition, byte-for-byte the same check the route
+    always ran, extracted so the dispatcher can run it after ITS OWN
+    transaction commits too."""
+    checked = 0
+    failures = []
+    for eid in elem_id_list:
+        pre = pre_move_points.get(get_element_id_value(eid))
+        if pre is None:
+            continue
+        elem = doc.GetElement(eid)
+        post = _location_point(elem)
+        if post is None:
+            continue
+        checked += 1
+        actual_disp = DB.XYZ(post.X - pre.X, post.Y - pre.Y, post.Z - pre.Z)
+        residual = (actual_disp - translation).GetLength()
+        if residual > LOCATION_TOLERANCE_FT:
+            failures.append({
+                "id": get_element_id_value(eid),
+                "expected_mm": _xyz_to_mm(translation),
+                "actual_mm": _xyz_to_mm(actual_disp),
+            })
+    verified = {
+        "ok": (len(failures) == 0) if checked else None,
+        "method": "location_displacement",
+        "expected": {"vector_mm": _xyz_to_mm(translation), "count": len(elem_id_list)},
+        "actual": {"count_checked": checked, "count_ok": checked - len(failures)},
+    }
+    if not checked:
+        verified["status"] = "not_checked"
+        verified["reason"] = "No element in this batch exposes LocationPoint/LocationCurve"
+    if failures:
+        verified["failures"] = failures[:50]
+    return verified
+
+
 def register_transform_routes(api):
     """Register all transform routes with the API"""
 
@@ -125,13 +196,8 @@ def register_transform_routes(api):
                     # actually moved (measured: a hosted element's host wall
                     # can silently reject a curve change with zero failure
                     # messages and Commit() still Committed).
-                    for eid in elem_id_list:
-                        elem = doc.GetElement(eid)
-                        pt = _location_point(elem)
-                        if pt is not None:
-                            pre_move_points[eid.IntegerValue] = pt
-                    for eid in elem_id_list:
-                        DB.ElementTransformUtils.MoveElement(doc, eid, translation)
+                    pre_move_points = capture_move_state(doc, elem_id_list)
+                    apply_move(doc, elem_id_list, translation)
 
                 elif operation == "copy":
                     vector = data.get("vector")
@@ -239,36 +305,7 @@ def register_transform_routes(api):
                 # a real post-condition here; "rotate"/"mirror" are honestly
                 # not_checked rather than backed by a shaky generic check.
                 if operation == "move" and pre_move_points:
-                    checked = 0
-                    failures = []
-                    for eid in elem_id_list:
-                        pre = pre_move_points.get(eid.IntegerValue)
-                        if pre is None:
-                            continue
-                        elem = doc.GetElement(eid)
-                        post = _location_point(elem)
-                        if post is None:
-                            continue
-                        checked += 1
-                        actual_disp = DB.XYZ(post.X - pre.X, post.Y - pre.Y, post.Z - pre.Z)
-                        residual = (actual_disp - translation).GetLength()
-                        if residual > LOCATION_TOLERANCE_FT:
-                            failures.append({
-                                "id": eid.IntegerValue,
-                                "expected_mm": _xyz_to_mm(translation),
-                                "actual_mm": _xyz_to_mm(actual_disp),
-                            })
-                    verified = {
-                        "ok": (len(failures) == 0) if checked else None,
-                        "method": "location_displacement",
-                        "expected": {"vector_mm": _xyz_to_mm(translation), "count": len(elem_id_list)},
-                        "actual": {"count_checked": checked, "count_ok": checked - len(failures)},
-                    }
-                    if not checked:
-                        verified["status"] = "not_checked"
-                        verified["reason"] = "No element in this batch exposes LocationPoint/LocationCurve"
-                    if failures:
-                        verified["failures"] = failures[:50]
+                    verified = verify_move(doc, elem_id_list, translation, pre_move_points)
                 elif operation == "copy" and new_element_ids:
                     verified = verify_elements_exist(doc, new_element_ids)
                 else:

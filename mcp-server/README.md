@@ -6,7 +6,7 @@
 > this README is upstream's; the "clone" steps below are already done for you —
 > just `cd` here and `uv sync`.
 
-MCP server for Autodesk Revit 2024/2025/2026/2027 via pyRevit — 51 tools for building design, editing, analysis, clash detection, MEP, interop, documentation, and model persistence.
+MCP server for Autodesk Revit 2024/2025/2026/2027 via pyRevit — 57 tools for building design, editing, analysis, clash detection, MEP, interop, documentation, model persistence, and coordinated multi-action plan execution.
 
 Works with any MCP client: Claude Desktop, Claude Code, Cursor, Windsurf, Copilot, or any other MCP-compatible application.
 
@@ -155,7 +155,7 @@ mcp dev main.py
 
 Then open `http://127.0.0.1:6274` in your browser.
 
-## Supported Tools (51)
+## Supported Tools (57)
 
 ### Create (15)
 
@@ -237,11 +237,17 @@ Then open `http://127.0.0.1:6274` in your browser.
 | `load_family` | Load a Revit family (`.rfa`) from disk so its types can be placed |
 | `save_document` | Save / Save-As the model to disk (persistence across sessions) |
 
-### Advanced (1)
+### Advanced (7)
 
 | Tool | Description |
 |------|-------------|
 | `execute_revit_code` | Execute IronPython code in Revit context |
+| `propose_plan` | Validate and write a structured, coordinated-change plan (no Revit call) |
+| `approve_plan` | Approve/reject a proposed plan; runs an advisory preflight against the live document |
+| `execute_plan` | Execute one budgeted slice of an approved plan as one TransactionGroup |
+| `get_task_status` | Read a plan/task's current state from disk - never touches Revit |
+| `cancel_task` | Request cancellation, honoured at the next between-actions boundary |
+| `rollback_task` | Build a compensation plan from a finished task's recorded inverses |
 
 ## Architecture
 
@@ -261,7 +267,7 @@ This server supports Revit 2024, 2025, 2026, and 2027 through centralized helper
 
 No configuration needed — version detection is automatic via try/except at runtime.
 
-> **Revit 2027 note:** Revit 2027 runs on **.NET 10** (vs .NET 8 in 2025/2026). This MCP server is pyRevit-based, so .NET compatibility is handled by pyRevit itself — ensure you run a **pyRevit build with Revit 2027 support**. None of the 51 tools use APIs removed in 2027 (AXM/FormIt import, `Mechanical.Zone` members, legacy rebar creation, or the dropped `EnergyDataSettings` properties).
+> **Revit 2027 note:** Revit 2027 runs on **.NET 10** (vs .NET 8 in 2025/2026). This MCP server is pyRevit-based, so .NET compatibility is handled by pyRevit itself — ensure you run a **pyRevit build with Revit 2027 support**. None of the 57 tools use APIs removed in 2027 (AXM/FormIt import, `Mechanical.Zone` members, legacy rebar creation, or the dropped `EnergyDataSettings` properties).
 
 ## Unit Handling
 

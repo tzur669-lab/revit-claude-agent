@@ -88,6 +88,59 @@ def _is_db_transaction_call(node):
     )
 
 
+def _is_db_transaction_group_call(node):
+    """True if `node` is a Call whose func is `DB.TransactionGroup` (the
+    Phase-A slice boundary, revit_mcp/plan_exec.py). Group names are
+    otherwise completely unguarded: TransactionGroup exposes no
+    GetTransactionNames() (confirmed live, 2026-09-01 -- only GetName() /
+    SetName()), so the only place a misnamed group could be caught is
+    here, statically, before it ever runs -- a group name without "MCP"
+    would relabel an entire slice's worth of Claude's work as a human's."""
+    if not isinstance(node, ast.Call):
+        return False
+    func = node.func
+    return (
+        isinstance(func, ast.Attribute)
+        and func.attr == "TransactionGroup"
+        and isinstance(func.value, ast.Name)
+        and func.value.id == "DB"
+    )
+
+
+def extract_transaction_group_names(source, filename):
+    """Every DB.TransactionGroup(doc, <name>) name in one file's source.
+    Same resolution rules as extract_transaction_names (literal, .format()
+    on a literal, or f-string); raises if a name can't be resolved."""
+    tree = ast.parse(source, filename=filename)
+    names = []
+    last_string_assignment = {}
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            val = _static_string_content(node.value)
+            if val is not None:
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        last_string_assignment[target.id] = val
+
+        if _is_db_transaction_group_call(node) and len(node.args) >= 2:
+            name_arg = node.args[1]
+            direct = _static_string_content(name_arg)
+            if direct is not None:
+                names.append((direct, node.lineno))
+                continue
+            if isinstance(name_arg, ast.Name) and name_arg.id in last_string_assignment:
+                names.append((last_string_assignment[name_arg.id], node.lineno))
+                continue
+            raise AssertionError(
+                "%s:%d - DB.TransactionGroup(doc, ...) name is neither a string "
+                "literal nor a variable with a known string value; this test "
+                "cannot verify it, which is itself worth fixing" % (filename, node.lineno)
+            )
+
+    return names
+
+
 def extract_transaction_names(source, filename):
     """Every DB.Transaction(doc, <name>) name in one file's source.
 
@@ -180,6 +233,29 @@ def test_mcp_tx_names_are_all_still_real():
         "tracker.MCP_TX_NAMES contains names no longer used by any route "
         "handler - re-derive the list from source rather than leaving stale "
         "entries: %r" % stale
+    )
+
+
+def test_every_transaction_group_name_satisfies_tx_is_ours():
+    """The group-level twin of test_every_transaction_name_satisfies_tx_is_ours.
+    Currently exercises revit_mcp/plan_exec.py's slice-boundary group names
+    once that module exists; passes vacuously (0 checked) until then, which
+    is correct -- there is nothing to violate before the file is written."""
+    violations = []
+    total_checked = 0
+
+    for path in all_revit_mcp_files():
+        with open(path, "r", encoding="utf-8") as f:
+            source = f.read()
+        for name, lineno in extract_transaction_group_names(source, path):
+            total_checked += 1
+            if not tracker._tx_is_ours([name]):
+                violations.append("%s:%d  %r" % (os.path.basename(path), lineno, name))
+
+    assert not violations, (
+        "the following TransactionGroup names would be misattributed to a "
+        "human by the tracker's _tx_is_ours() - a group name must contain "
+        "\"MCP\":\n  " + "\n  ".join(violations)
     )
 
 

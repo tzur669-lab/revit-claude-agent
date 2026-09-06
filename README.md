@@ -12,7 +12,7 @@ BIM models change constantly, and usually by more than one hand. When an AI
 assistant joins that loop it can move fast — but it has amnesia: every request
 starts from zero, and nothing records what it touched or why. `revit-claude-agent`
 addresses both halves. It connects [Claude Code](https://claude.com/claude-code)
-to a live Revit session through 51 modelling tools, and wraps that connection in
+to a live Revit session through 57 modelling tools, and wraps that connection in
 a tracking layer that photographs the model *before* any work, detects every
 change since last time — including edits a colleague made by hand in Revit —
 attributes each one to a person or to the AI **by evidence**, and writes a
@@ -50,7 +50,7 @@ memory.
   captured and journaled on the next session, so the project history stays whole.
 - **Reach the rest of the model.** Clash detection, MEP routing, view / sheet /
   schedule creation, IFC export, and arbitrary Revit API scripting through the
-  51 MCP tools.
+  57 MCP tools.
 - **Record a "why", not just a "what".** Every journal entry keeps the request and
   the reasoning ("identical mirrored-apartment plan around a central core"), so
   *"725 elements added"* is still legible a month later.
@@ -74,10 +74,13 @@ pyRevit Routes       IronPython 2.7, inside Revit     ← pyRevit (installed sep
 Revit API
 ```
 
-**The connection** (`mcp-server/`) exposes 51 tools for building, editing,
+**The connection** (`mcp-server/`) exposes 57 tools for building, editing,
 querying and analysing a live model — including a relationship inspector, an
-always-rolled-back delete-impact dry run, and a design-standards validator. It
-is stateless — every call forgets the last.
+always-rolled-back delete-impact dry run, and a design-standards validator.
+Every tool call is independent — except the six plan/task tools
+(`propose_plan` … `rollback_task`), which coordinate a multi-action change as
+one durable task under `~/.claude/revit-tracker/tasks/` (see
+[docs/architecture.md](docs/architecture.md#the-execution-spine-plantask-lifecycle)).
 
 **The memory** (`memory-system/`) rides the same channel: the `revit-session`
 skill runs `tracker.py` *inside Revit* through the server's code-execution tool,
@@ -86,7 +89,7 @@ It is the part that "first maps what already exists" before anything is touched.
 
 | Player | Runs where | Role |
 |---|---|---|
-| `mcp-server/` | your machine | the MCP protocol and the 51 tool definitions |
+| `mcp-server/` | your machine | the MCP protocol and the 57 tool definitions |
 | `memory-system/tracker/tracker.py` | inside the Revit process | snapshot, diff, attribution |
 | `revit-session` skill | Claude Code | the protocol — when to snapshot, checkpoint, and log |
 | `revit-historian` agent | background | rebuilds a history briefing from disk, in parallel |

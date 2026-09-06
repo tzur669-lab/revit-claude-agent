@@ -23,6 +23,86 @@ logger = logging.getLogger(__name__)
 PLACEMENT_TOLERANCE_FT = 10.0 / 304.8
 
 
+# ---------------------------------------------------------------------------
+# place_family core -- transaction-agnostic, extracted from the route below
+# with no behaviour change, shared with revit_mcp/ops.py's dispatcher. The
+# friendly route resolves family/type BY NAME and auto-detects a host wall
+# by proximity; the plan-level op is narrower by design -- Claude resolves
+# symbol_id and host_id (when hosted) during planning, so only the actual
+# instance-creation call and its post-condition are shared.
+# ---------------------------------------------------------------------------
+
+def apply_place_family(doc, symbol, point, level=None, host=None):
+    """Activates the symbol if needed, then calls the correct
+    NewFamilyInstance overload for the host/level combination given.
+    Assumes an open, caller-owned transaction; never commits, never rolls
+    back. Returns the created instance (a pre-commit handle -- callers
+    must re-resolve by id after commit)."""
+    if not symbol.IsActive:
+        symbol.Activate()
+        doc.Regenerate()  # ensure activation takes effect
+
+    if host is not None:
+        if level is not None:
+            return doc.Create.NewFamilyInstance(
+                point, symbol, host, level, DB.Structure.StructuralType.NonStructural
+            )
+        return doc.Create.NewFamilyInstance(
+            point, symbol, host, DB.Structure.StructuralType.NonStructural
+        )
+    elif level is not None:
+        return doc.Create.NewFamilyInstance(
+            point, symbol, level, DB.Structure.StructuralType.NonStructural
+        )
+    else:
+        return doc.Create.NewFamilyInstance(
+            point, symbol, DB.Structure.StructuralType.NonStructural
+        )
+
+
+def verify_place_family(doc, new_id, point, host_id):
+    """The location_point / location_z_only post-condition, byte-for-byte
+    the same check the route always ran -- host-hosted instances
+    legitimately project X/Y onto the host wall's constraint, so only Z is
+    checked there (the axis both historical elevation bugs live on)."""
+    FEET_TO_MM = 304.8
+    elem_after = doc.GetElement(DB.ElementId(new_id))
+    if elem_after is None:
+        return {"ok": False, "method": "element_exists",
+                "reason": "New instance does not resolve after commit"}
+    try:
+        actual_location = elem_after.Location.Point
+    except Exception:
+        actual_location = None
+    if actual_location is None:
+        return {"ok": None, "status": "not_checked",
+                "reason": "Instance has no LocationPoint to compare"}
+
+    dz = abs(actual_location.Z - point.Z)
+    if host_id is not None:
+        return {
+            "ok": dz <= PLACEMENT_TOLERANCE_FT,
+            "method": "location_z_only",
+            "expected": {"z_mm": point.Z * FEET_TO_MM},
+            "actual": {"z_mm": actual_location.Z * FEET_TO_MM},
+            "reason": "X/Y not checked - wall-hosted instances legitimately project onto the host wall",
+        }
+    dx = abs(actual_location.X - point.X)
+    dy = abs(actual_location.Y - point.Y)
+    ok = dx <= PLACEMENT_TOLERANCE_FT and dy <= PLACEMENT_TOLERANCE_FT and dz <= PLACEMENT_TOLERANCE_FT
+    verified = {
+        "ok": ok,
+        "method": "location_point",
+        "expected": {"x_mm": point.X * FEET_TO_MM, "y_mm": point.Y * FEET_TO_MM, "z_mm": point.Z * FEET_TO_MM},
+        "actual": {"x": actual_location.X * FEET_TO_MM, "y": actual_location.Y * FEET_TO_MM, "z": actual_location.Z * FEET_TO_MM},
+    }
+    if not ok:
+        verified["reason"] = "actual location does not match requested location within {:.1f}mm".format(
+            PLACEMENT_TOLERANCE_FT * FEET_TO_MM
+        )
+    return verified
+
+
 def register_placement_routes(api):
     """Register all placement-related routes with the API"""
 
@@ -191,10 +271,8 @@ def register_placement_routes(api):
             suppress_warnings(t)
 
             try:
-                # Ensure the symbol is activated
-                if not target_symbol.IsActive:
-                    target_symbol.Activate()
-                    doc.Regenerate()  # Ensure activation takes effect
+                # Symbol activation now happens inside apply_place_family,
+                # right before the instance is created.
 
                 # Determine whether this family must be hosted by a wall
                 # (windows, doors, and other wall-hosted families). Using the
@@ -243,24 +321,7 @@ def register_placement_routes(api):
                             continue
 
                 # Create the instance
-                if host_wall is not None:
-                    # Wall-hosted placement (windows/doors)
-                    if target_level:
-                        new_instance = doc.Create.NewFamilyInstance(
-                            point,
-                            target_symbol,
-                            host_wall,
-                            target_level,
-                            DB.Structure.StructuralType.NonStructural,
-                        )
-                    else:
-                        new_instance = doc.Create.NewFamilyInstance(
-                            point,
-                            target_symbol,
-                            host_wall,
-                            DB.Structure.StructuralType.NonStructural,
-                        )
-                elif needs_wall_host:
+                if host_wall is None and needs_wall_host:
                     # Hosted family but no wall found nearby — fail clearly
                     # instead of creating a broken unhosted instance at the origin.
                     t.RollBack()
@@ -270,19 +331,7 @@ def register_placement_routes(api):
                         },
                         status=400,
                     )
-                elif target_level:
-                    # Place on specific level
-                    new_instance = doc.Create.NewFamilyInstance(
-                        point,
-                        target_symbol,
-                        target_level,
-                        DB.Structure.StructuralType.NonStructural,
-                    )
-                else:
-                    # Place without level specification
-                    new_instance = doc.Create.NewFamilyInstance(
-                        point, target_symbol, DB.Structure.StructuralType.NonStructural
-                    )
+                new_instance = apply_place_family(doc, target_symbol, point, level=target_level, host=host_wall)
 
                 logger.info(
                     "Family instance created with ID: {}".format(
@@ -389,32 +438,7 @@ def register_placement_routes(api):
                 # onto the wall's constraint, so only Z is checked there;
                 # Z is not affected by that projection and is exactly the
                 # axis both historical elevation bugs live on.
-                if elem_after is None:
-                    verified = {"ok": False, "method": "element_exists", "reason": "New instance does not resolve after commit"}
-                elif actual_location is None:
-                    verified = {"ok": None, "status": "not_checked", "reason": "Instance has no LocationPoint to compare"}
-                else:
-                    dz = abs(actual_location.Z - point.Z)
-                    if host_wall is not None:
-                        verified = {
-                            "ok": dz <= PLACEMENT_TOLERANCE_FT,
-                            "method": "location_z_only",
-                            "expected": {"z_mm": point.Z * FEET_TO_MM},
-                            "actual": {"z_mm": actual_location.Z * FEET_TO_MM},
-                            "reason": "X/Y not checked - wall-hosted instances legitimately project onto the host wall",
-                        }
-                    else:
-                        dx = abs(actual_location.X - point.X)
-                        dy = abs(actual_location.Y - point.Y)
-                        ok = dx <= PLACEMENT_TOLERANCE_FT and dy <= PLACEMENT_TOLERANCE_FT and dz <= PLACEMENT_TOLERANCE_FT
-                        verified = {
-                            "ok": ok,
-                            "method": "location_point",
-                            "expected": {"x_mm": point.X * FEET_TO_MM, "y_mm": point.Y * FEET_TO_MM, "z_mm": point.Z * FEET_TO_MM},
-                            "actual": actual_coords,
-                        }
-                        if not ok:
-                            verified["reason"] = "actual location does not match requested location within {:.1f}mm".format(PLACEMENT_TOLERANCE_FT * FEET_TO_MM)
+                verified = verify_place_family(doc, new_id, point, host_wall)
 
                 # Return information about the placed instance
                 response_data = {

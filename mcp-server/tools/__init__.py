@@ -29,6 +29,7 @@ def register_tools(mcp_server, revit_get_func, revit_post_func, revit_image_func
     from .document_tools import register_document_tools
     from .impact_tools import register_impact_tools
     from .validation_tools import register_validation_tools
+    from .plan_tools import register_plan_tools
 
     # Register tools from each module
     register_status_tools(mcp_server, revit_get_func)
@@ -57,6 +58,7 @@ def register_tools(mcp_server, revit_get_func, revit_post_func, revit_image_func
     register_document_tools(mcp_server, revit_get_func, revit_post_func, revit_image_func)
     register_impact_tools(mcp_server, revit_get_func, revit_post_func, revit_image_func)
     register_validation_tools(mcp_server, revit_get_func, revit_post_func, revit_image_func)
+    register_plan_tools(mcp_server, revit_get_func, revit_post_func, revit_image_func)
 
     _attach_registry_annotations(mcp_server)
 

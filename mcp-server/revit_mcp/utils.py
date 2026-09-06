@@ -128,6 +128,87 @@ def param_read_matches(param, storage_type, intended):
     return False, "unsupported storage type"
 
 
+# ---------------------------------------------------------------------------
+# parameter resolve/read/write cores -- transaction-agnostic, extracted from
+# editing.py's modify_element with NO behaviour change. Shared by that route
+# and revit_mcp/ops.py's "set_parameters" dispatcher op.
+# ---------------------------------------------------------------------------
+
+def resolve_param(doc, elem, parameter_name, allow_type_fallback):
+    """(param_or_None, owner_element). LookupParameter on the element
+    first; when allow_type_fallback is True and nothing is found there,
+    falls back to the element's TYPE's own parameter of the same name.
+    owner_element is `elem` or the type element -- useful for a caller
+    building an error message. Never raises.
+
+    allow_type_fallback stays a real parameter rather than being folded
+    away: the existing set_parameter route falls back to the type; the
+    existing modify_element route deliberately does not. Unifying the two
+    would silently change modify_element's behaviour, which this
+    extraction must not do."""
+    param = None
+    try:
+        param = elem.LookupParameter(parameter_name)
+    except Exception:
+        param = None
+    owner = elem
+    if param is None and allow_type_fallback:
+        try:
+            type_id = elem.GetTypeId()
+            if type_id and type_id != DB.ElementId.InvalidElementId:
+                type_elem = doc.GetElement(type_id)
+                if type_elem is not None:
+                    type_param = type_elem.LookupParameter(parameter_name)
+                    if type_param is not None:
+                        param, owner = type_param, type_elem
+        except Exception:
+            pass
+    return param, owner
+
+
+def read_param_typed(param):
+    """(storage_type, old_value_str) -- the same four-branch typing
+    param_read_matches uses, byte-for-byte the same as modify_element's
+    former inline old-value capture. Never raises; (None, "") on failure."""
+    try:
+        st = param.StorageType
+        if st == DB.StorageType.String:
+            return st, (param.AsString() or "")
+        elif st == DB.StorageType.Integer:
+            return st, str(param.AsInteger())
+        elif st == DB.StorageType.Double:
+            return st, str(round(param.AsDouble(), 6))
+        elif st == DB.StorageType.ElementId:
+            return st, str(get_element_id_value(param.AsElementId()))
+        return st, ""
+    except Exception:
+        return None, ""
+
+
+def set_param_typed(param, value):
+    """param.Set() by StorageType -- the exact logic modify_element's inline
+    branch used. Assumes an open, caller-owned transaction; never commits,
+    never rolls back. Raises ValueError("unsupported storage type") for a
+    storage type none of the four branches handle, or propagates whatever
+    param.Set()/the type conversion itself raises -- callers distinguish
+    the two to preserve modify_element's original two distinct failure
+    messages ("unsupported storage type" vs "set failed: <error>").
+    Returns the StorageType used, so a caller does not need to re-read
+    param.StorageType a second time to build its to_verify record."""
+    st = param.StorageType
+    if st == DB.StorageType.String:
+        param.Set(str(value))
+    elif st == DB.StorageType.Integer:
+        param.Set(int(value))
+    elif st == DB.StorageType.Double:
+        param.Set(float(value))
+    elif st == DB.StorageType.ElementId:
+        param.Set(make_element_id(value))
+    else:
+        raise ValueError("unsupported storage type")
+    return st
+
+
 def verify_created_elements(doc, id_category_pairs):
     """Level-2 post-condition for create_* operations: each created element
     id must resolve, and (when an expected BuiltInCategory is given for that

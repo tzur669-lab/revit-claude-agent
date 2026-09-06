@@ -15,6 +15,31 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# create_line_based_element core (walls only) -- transaction-agnostic,
+# extracted from create_line_based's wall branch with no behaviour change,
+# shared with revit_mcp/ops.py's dispatcher. The friendly /create_line/
+# route below stays batch-oriented with name-based type/level resolution
+# (walls AND beams); the plan-level op is narrower by design -- Claude
+# resolves type/level names to ids during planning, so the op takes
+# pre-resolved ids and creates exactly one wall. Only the actual
+# DB.Wall.Create call is shared, since that is the only part with no
+# lookup/batch shape to reconcile.
+# ---------------------------------------------------------------------------
+
+def apply_create_wall(doc, curve, wall_type_id, level_id, height_feet, offset_feet, is_structural):
+    """DB.Wall.Create -- the exact call the route's wall branch uses.
+    Assumes an open, caller-owned transaction; never commits, never rolls
+    back. Returns the created Wall (a pre-commit object handle -- callers
+    must re-resolve by id after commit; a pre-commit handle can go stale
+    once the transaction closes, measured live 2026-09-01)."""
+    return DB.Wall.Create(doc, curve, wall_type_id, level_id, height_feet, offset_feet, False, is_structural)
+
+
+def verify_line_based_elements(doc, id_category_pairs):
+    return verify_created_elements(doc, id_category_pairs)
+
+
 def register_building_routes(api):
     """Register all building creation routes with the API"""
 
@@ -175,15 +200,9 @@ def register_building_routes(api):
                             offset_feet = offset_mm / 304.8
                             is_structural = bool(elem.get("structural", False))
 
-                            wall = DB.Wall.Create(
-                                doc,
-                                line,
-                                wall_type.Id,
-                                level.Id,
-                                height_feet,
-                                offset_feet,
-                                False,
-                                is_structural,
+                            wall = apply_create_wall(
+                                doc, line, wall_type.Id, level.Id,
+                                height_feet, offset_feet, is_structural,
                             )
 
                             wall_id = get_element_id_value(wall)

@@ -4,13 +4,57 @@ Editing Module for Revit MCP
 Handles element deletion, modification, and selection retrieval
 """
 
-from utils import get_element_name, make_element_id, get_element_id_value, suppress_warnings, repair_hebrew_in, commit_verified, param_read_matches
+from utils import get_element_name, make_element_id, get_element_id_value, suppress_warnings, repair_hebrew_in, commit_verified, param_read_matches, resolve_param, read_param_typed, set_param_typed
 from pyrevit import routes, revit, DB
 import json
 import traceback
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# delete_elements core -- transaction-agnostic, extracted from the route
+# below with no behaviour change, shared with revit_mcp/ops.py's dispatcher.
+# ---------------------------------------------------------------------------
+
+def apply_delete(doc, elements_to_delete):
+    """doc.Delete per id -> (deleted_ids, cascaded_ids), both plain ints.
+    cascaded_ids is already deduped against the primary ids -- doc.Delete's
+    own return value is Revit's authoritative cascade answer, not a
+    re-derived guess. Assumes an open, caller-owned transaction; never
+    commits, never rolls back."""
+    deleted_ids = []
+    cascaded_ids = []
+    for elem_id in elements_to_delete:
+        result = doc.Delete(elem_id)
+        primary_id = get_element_id_value(elem_id)
+        deleted_ids.append(primary_id)
+        if result:
+            for del_id in result:
+                del_id_int = get_element_id_value(del_id)
+                if del_id_int != primary_id and del_id_int not in cascaded_ids:
+                    cascaded_ids.append(del_id_int)
+    cascaded_ids = [cid for cid in cascaded_ids if cid not in deleted_ids]
+    return deleted_ids, cascaded_ids
+
+
+def verify_delete(doc, elements_to_delete):
+    """Level-2 post-condition: each ORIGINALLY-requested element must no
+    longer resolve. Cascaded deletions are a bonus/side effect, not part
+    of this operation's own contract -- unchanged from the route's
+    original inline check."""
+    still_exists = [get_element_id_value(eid) for eid in elements_to_delete
+                     if doc.GetElement(eid) is not None]
+    verified = {
+        "ok": len(still_exists) == 0,
+        "method": "element_absent",
+        "expected": {"count": len(elements_to_delete)},
+        "actual": {"count_deleted": len(elements_to_delete) - len(still_exists)},
+    }
+    if still_exists:
+        verified["failures"] = [{"id": i} for i in still_exists[:50]]
+    return verified
 
 
 def register_editing_routes(api):
@@ -58,21 +102,7 @@ def register_editing_routes(api):
             suppress_warnings(t)
 
             try:
-                deleted_ids = []
-                cascaded_ids = []
-
-                for elem_id in elements_to_delete:
-                    # doc.Delete returns a collection of all deleted IDs (including cascaded)
-                    result = doc.Delete(elem_id)
-                    primary_id = get_element_id_value(elem_id)
-                    deleted_ids.append(primary_id)
-
-                    # Track cascaded deletions
-                    if result:
-                        for del_id in result:
-                            del_id_int = get_element_id_value(del_id)
-                            if del_id_int != primary_id and del_id_int not in cascaded_ids:
-                                cascaded_ids.append(del_id_int)
+                deleted_ids, cascaded_ids = apply_delete(doc, elements_to_delete)
 
                 tx_ok, tx_status = commit_verified(t)
                 if tx_ok is False:
@@ -86,22 +116,10 @@ def register_editing_routes(api):
                         status=500,
                     )
 
-                # Remove primary IDs from cascaded list
-                cascaded_ids = [cid for cid in cascaded_ids if cid not in deleted_ids]
-
                 # Level 2: each originally-requested element must no longer
                 # resolve. Cascaded deletions are a bonus/side effect, not
                 # part of this operation's own contract.
-                still_exists = [get_element_id_value(eid) for eid in elements_to_delete
-                                 if doc.GetElement(eid) is not None]
-                verified = {
-                    "ok": len(still_exists) == 0,
-                    "method": "element_absent",
-                    "expected": {"count": len(elements_to_delete)},
-                    "actual": {"count_deleted": len(elements_to_delete) - len(still_exists)},
-                }
-                if still_exists:
-                    verified["failures"] = [{"id": i} for i in still_exists[:50]]
+                verified = verify_delete(doc, elements_to_delete)
 
                 message = "Deleted {} element{}".format(
                     len(deleted_ids),
@@ -188,7 +206,10 @@ def register_editing_routes(api):
                 to_verify = []  # (param_name, storage_type, intended) - set() didn't raise
 
                 for param_name, new_value in parameters.items():
-                    param = elem.LookupParameter(param_name)
+                    # allow_type_fallback=False: modify_element, unlike
+                    # set_parameter, deliberately never falls back to the
+                    # element's type parameter -- preserved exactly.
+                    param, _owner = resolve_param(doc, elem, param_name, allow_type_fallback=False)
                     if not param:
                         # List available parameters for better error messages
                         available = []
@@ -212,49 +233,40 @@ def register_editing_routes(api):
                         })
                         continue
 
-                    # Get old value
-                    old_value = ""
-                    try:
-                        if param.StorageType == DB.StorageType.String:
-                            old_value = param.AsString() or ""
-                        elif param.StorageType == DB.StorageType.Integer:
-                            old_value = str(param.AsInteger())
-                        elif param.StorageType == DB.StorageType.Double:
-                            old_value = str(round(param.AsDouble(), 6))
-                        elif param.StorageType == DB.StorageType.ElementId:
-                            old_value = str(get_element_id_value(param.AsElementId()))
-                    except Exception:
-                        old_value = ""
+                    _storage_type, old_value = read_param_typed(param)
 
-                    # Set new value
                     try:
-                        if param.StorageType == DB.StorageType.String:
-                            param.Set(str(new_value))
-                        elif param.StorageType == DB.StorageType.Integer:
-                            param.Set(int(new_value))
-                        elif param.StorageType == DB.StorageType.Double:
-                            param.Set(float(new_value))
-                        elif param.StorageType == DB.StorageType.ElementId:
-                            param.Set(make_element_id(new_value))
-                        else:
+                        set_param_typed(param, new_value)
+                    except ValueError as type_err:
+                        # set_param_typed raises exactly this message for a
+                        # storage type none of the four branches handle --
+                        # preserve the original's distinct "unsupported
+                        # storage type" reason (no "set failed:" prefix).
+                        if str(type_err) == "unsupported storage type":
                             failed.append({
                                 "parameter": param_name,
                                 "reason": "unsupported storage type",
                             })
-                            continue
-
-                        changes.append({
-                            "parameter": param_name,
-                            "old_value": old_value,
-                            "new_value": str(new_value),
-                            "status": "set",
-                        })
-                        to_verify.append((param_name, param.StorageType, new_value))
+                        else:
+                            failed.append({
+                                "parameter": param_name,
+                                "reason": "set failed: {}".format(str(type_err)),
+                            })
+                        continue
                     except Exception as set_err:
                         failed.append({
                             "parameter": param_name,
                             "reason": "set failed: {}".format(str(set_err)),
                         })
+                        continue
+
+                    changes.append({
+                        "parameter": param_name,
+                        "old_value": old_value,
+                        "new_value": str(new_value),
+                        "status": "set",
+                    })
+                    to_verify.append((param_name, param.StorageType, new_value))
 
                 tx_ok, tx_status = commit_verified(t)
                 if tx_ok is False:

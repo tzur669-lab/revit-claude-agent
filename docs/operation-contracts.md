@@ -356,6 +356,128 @@ limits : does not verify the saved file's content is valid/complete,
 
 ---
 
+## The Phase A execution spine — `propose_plan` → `approve_plan` → `execute_plan` → `get_task_status`
+
+A fourth contract, distinct from levels 1/2 above and from the read-only/dry-run
+contract below: a **plan** is a validated, hashed, immutable JSON document
+(`tools/plan_schema.py`) describing a coordinated multi-action change; a
+**task** is that plan's execution record, living under
+`~/.claude/revit-tracker/tasks/<task_id>/` as an append-only ledger
+(`ledger.ndjson`, `revit_mcp/task_store.py`) plus a derived, rebuildable
+`progress.json` projection. Three tools (`propose_plan`, `get_task_status`,
+`rollback_task`) never call Revit at all — they only touch this filesystem
+contract. `approve_plan` calls `/preflight_plan/` (read-only, opens no
+transaction). Only `execute_plan` mutates the model.
+
+### `execute_plan` (`revit_mcp/plan_exec.py`)
+
+```
+unit   : one HTTP call = one BUDGETED SLICE = one DB.TransactionGroup
+         containing one DB.Transaction per action (revit_mcp/ops.py's
+         "run" functions never open a transaction themselves - the slice
+         loop in plan_exec.py owns every Start()/commit_verified()/
+         RollBack()/Assimilate() call; tests/test_ops_no_transactions.py
+         is an AST guard for exactly this).
+level 1: commit_verified() per action, unchanged contract - Committed
+         inside a group means "accepted by the database AND still
+         revocable by the enclosing group until Assimilate()".
+level 2: each op's own verify() (see the op table below), run after that
+         action's transaction commits.
+atomicity: Assimilate() merges the slice's inner transactions into ONE
+         undo entry; a failed inner transaction does NOT poison the group
+         - a later action in the same slice can still commit and the
+         group can still Assimilate() cleanly (measured live, 2026-09-01).
+         Cross-slice atomicity does NOT exist - a plan spanning multiple
+         slices is disclosed as such (slice_atomicity per slice, task-level
+         "atomicity" only meaningful at a terminal state) rather than
+         implied to be all-or-nothing.
+group  : never held open across HTTP requests - a group outliving its
+         handler is owned by nobody, and a client timeout would strand
+         the model with no code path left to close it.
+budget : DEFAULT_SLICE_BUDGET_MS=20000, hard-capped at 25000; checked
+         BEFORE starting each action, never mid-action. HTTP timeout for
+         this one endpoint is 75s (main.py's ENDPOINT_TIMEOUTS) - the gap
+         covers Assimilate(), ledger/progress writes, and UI-thread
+         queueing, none of which the budget can bound.
+```
+
+**TransactionGroup mechanics, measured live before any of this was written
+(2026-09-01):** `RollBack()` exists; `RollBackAll()` does not.
+`TransactionGroup` exposes no `GetFailureHandlingOptions`/
+`SetFailureHandlingOptions` and no `GetTransactionNames()` — `suppress_warnings()`
+goes on the **inner** transactions only (calling it on the group silently
+no-ops, since its own `try/except` swallows the resulting `AttributeError`,
+while looking protected); group names are guarded statically instead
+(`tests/test_transaction_names.py::test_every_transaction_group_name_satisfies_tx_is_ours`).
+
+### The v1 op set (`revit_mcp/ops.py`, data twin `tools/ops_schema.py`)
+
+Each op provides `capture`/`run`/`verify`/`inverse`/`probe`. `capture(doc, args,
+targets)` runs before any mutation and is recorded into the ledger's
+`action_begin` record; `inverse(args, targets, before, result)` is PURE (no
+`doc`) and is computed **before commit** for `idempotency="absolute"` ops, or
+**after commit** (using `result`, since the target didn't exist beforehand)
+for `idempotency="creating"` ops.
+
+| op | idempotency | fidelity | post-condition method |
+|---|---|---|---|
+| `move_elements` | absolute | exact | `location_displacement` (reuses `transforms.verify_move`) |
+| `set_parameters` | absolute | exact | `param_read_back` (reuses `utils.param_read_matches`) |
+| `set_wall_curve` | absolute | approximate | `curve_endpoints`, 1mm tolerance |
+| `delete_elements` | absolute | **irreversible** | `element_absent` (reuses `editing.verify_delete`) |
+| `create_room` | creating | compensatable | `room_area` (reuses `rooms.verify_room`) |
+| `create_room_separation` | creating | compensatable | `element_category` |
+| `create_line_based_element` | creating | compensatable | `element_category` (walls only, see `building.apply_create_wall`) |
+| `place_family` | creating | compensatable | `location_point` / `location_z_only` (reuses `placement.verify_place_family`) |
+
+**Idempotency classing is the fix for a real hazard, not decoration.**
+`DB.ElementTransformUtils.MoveElement` is *relative* — applying it twice moves
+twice. `move_elements` is made *absolute* by capturing each target's point
+before the move and computing the applied translation as `target − current`
+at run time (`target = captured_point + requested_vector`), so re-running
+after a partial or complete prior application converges instead of
+accumulating. `set_parameters`/`set_wall_curve`/`delete_elements` are
+naturally absolute (setting the same value or deleting an already-deleted id
+is a no-op the second time). The four `creating` ops make a duplicate on
+reapplication, so a crash inside their transaction window (`action_begin`
+logged, no matching `action_end`) is resolved by `probe(doc, args, before)` —
+`"applied"` skips, `"not_applied"` re-runs, `"unknown"` (including every
+creating op that has no conclusive membership test — `create_room_separation`,
+`create_line_based_element`, `place_family` all return `"unknown"`
+unconditionally today) blocks the task for human review rather than guessing.
+`create_room`'s probe uses `doc.GetRoomAtPoint` — the only one of the four
+with a real membership test in this pass.
+
+### Unexpected-change detection (`tools/plan_tools.py::_check_unexpected_changes`)
+
+The executor never invokes the tracker itself — `tracker.main()` raises
+`TrackerOK` by design to force a rollback (fatal if caught inside the
+executor's own transaction machinery), `op_snapshot` calls the destructive
+`drain_events()` which would consume the executor's own DocumentChanged
+events, and a tracker checkpoint fired from inside the executor could race a
+concurrent Claude-initiated checkpoint for `<instance_dir>/.lock`. Instead:
+the executor records `touched_uids` per action (the tracker's delta is keyed
+by uid, and a deleted element's id can never be resolved to one afterward);
+Claude runs the checkpoint through the existing `execute_revit_code` +
+`revit-session` path; `get_task_status(check_unexpected=True)` then reads
+`~/.claude/revit-tracker/last_run.json` and its `delta_file` (never the
+capped `last_run.json["items"]`) and classifies each changed item
+`accounted` / `side_effect` (category in the plan's own
+`expected_changes.tolerated_side_effects`) / `foreign` (attributed to
+`human`/`sync_incoming`, never ours to begin with) / `unexpected`. Refuses
+the comparison outright when `delta["run"] == baseline_run` — no checkpoint
+has run since this task's baseline, so any comparison would silently include
+older work.
+
+**Known, disclosed scope reduction:** preflight (`plan_exec.py::preflight`)
+checks that every target element still **exists**, not that it is still the
+**same** element (a full `UniqueId`-drift check would need a Revit round-trip
+at propose time, which `propose_plan` deliberately does not make). Each op's
+own `capture()`/`verify()` cycle provides a partial, not complete, safety net
+on top of this.
+
+---
+
 ## Read-only and dry-run operations — a third contract, not level 1/2
 
 Two operations added after the Milestone 0–3 gate (`revit_mcp/impact.py`, first

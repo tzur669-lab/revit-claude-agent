@@ -201,4 +201,18 @@ TOOLS = {
 
     # -- validation_tools.py ------------------------------------------------
     "validate_design": _entry("analysis", "read", False, "documented"),
+
+    # -- plan_tools.py --------------------------------------------------
+    # Phase A execution spine: propose -> approve -> execute -> status,
+    # plus cancel/rollback. Three of these (propose_plan, get_task_status,
+    # rollback_task) call NO Revit endpoint at all - filesystem-only reads/
+    # writes against revit_mcp/task_store.py's task files. See
+    # tests/test_tool_registry.py's _FILESYSTEM_ONLY_TOOLS for the sanctioned
+    # relaxation this requires in the tool<->route drift checks.
+    "propose_plan": _entry("advanced", "read", False, "documented"),
+    "approve_plan": _entry("advanced", "read", False, "documented"),
+    "execute_plan": _entry("advanced", "destructive", True, "documented"),
+    "get_task_status": _entry("advanced", "read", False, "documented"),
+    "cancel_task": _entry("advanced", "read", False, "documented"),
+    "rollback_task": _entry("advanced", "read", False, "documented"),
 }

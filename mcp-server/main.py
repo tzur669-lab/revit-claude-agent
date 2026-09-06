@@ -122,9 +122,31 @@ async def revit_image(endpoint: str, ctx: Context = None) -> Union[Image, str]:
         return f"Error: {e}"
 
 
-async def _revit_call(method: str, endpoint: str, data: Dict = None, ctx: Context = None, 
-                     timeout: float = 30.0, params: Dict = None) -> Union[Dict, str]:
+# Per-endpoint HTTP read timeout. Anything not named here keeps the 30s
+# default all 51 pre-existing tools already use - so adding an entry here
+# is zero behaviour change for every endpoint not listed. Only the two
+# execute_plan routes are inherently longer than one UI-thread beat: a
+# slice's own budget is 20s (revit_mcp/plan_exec.py's
+# DEFAULT_SLICE_BUDGET_MS), but the budget only bounds when the loop stops
+# STARTING new actions - it cannot bound an action already running, nor
+# Assimilate(), nor the ledger/progress writes, nor queueing behind
+# another route on the UI thread. 75s leaves that headroom while still
+# being well inside typical client patience.
+ENDPOINT_TIMEOUTS: Dict[str, float] = {
+    "/execute_plan/": 75.0,
+}
+
+
+def _timeout_for(endpoint: str, override: float = None) -> float:
+    if override is not None:
+        return override
+    return ENDPOINT_TIMEOUTS.get(endpoint, 30.0)
+
+
+async def _revit_call(method: str, endpoint: str, data: Dict = None, ctx: Context = None,
+                     timeout: float = None, params: Dict = None) -> Union[Dict, str]:
     """Internal function handling all HTTP calls"""
+    timeout = _timeout_for(endpoint, timeout)
     try:
         client = _get_client()
 
@@ -157,6 +179,22 @@ async def _revit_call(method: str, endpoint: str, data: Dict = None, ctx: Contex
             parsed["_http_status"] = response.status_code
             return parsed
         return f"Error: {response.status_code} - {response.text}"
+    except httpx.TimeoutException:
+        # Today every exception collapses to f"Error: {e}", and
+        # httpx.TimeoutException's str() is frequently empty - the most
+        # opaque possible failure. A timeout does NOT mean Revit stopped:
+        # the request may still be running server-side. execute_plan's own
+        # tool body (tools/plan_tools.py) catches error_kind ==
+        # "client_timeout" specifically and reads progress.json off disk
+        # instead of returning this - the timeout becomes a read, and the
+        # read is authoritative because its writer is the thing that
+        # timed out. Every other tool just sees a clearer error than before.
+        return {
+            "status": "error", "error_kind": "client_timeout", "endpoint": endpoint,
+            "timeout_s": timeout, "_http_status": 504,
+            "error": f"No response within {timeout}s. The Revit side may still be "
+                     f"running - this is NOT proof the work did not happen.",
+        }
     except Exception as e:
         return f"Error: {e}"
 

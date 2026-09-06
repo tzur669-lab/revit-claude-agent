@@ -123,6 +123,10 @@ def register_routes():
 
         register_validation_routes(api)
 
+        from revit_mcp.plan_exec import register_plan_routes
+
+        register_plan_routes(api)
+
         logger.info("All MCP routes registered successfully")
 
     except Exception as e:

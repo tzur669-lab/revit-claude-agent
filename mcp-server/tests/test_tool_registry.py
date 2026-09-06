@@ -37,6 +37,27 @@ from tools.registry import TOOLS, CATEGORIES, RISK_LEVELS
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 MCP_SERVER_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+# Phase A's execution spine (tools/plan_tools.py) introduced the first
+# tools that call NO Revit endpoint at all - they read/write task files
+# under ~/.claude/revit-tracker/tasks/<task_id>/ directly via
+# revit_mcp/task_store.py (which has zero Revit-API dependency, see that
+# module's own docstring), never touching a route. This is the exact,
+# anticipated relaxation this file's own test_tool_and_route_totals_are_equal
+# docstring calls for: "If a future change makes this genuinely N:M, this
+# specific equality check is the one to relax, with a comment explaining
+# the new shape - the per-tool/per-route checks above are what actually
+# matter." Each name here must have a written reason in this comment, not
+# just be added silently:
+#   propose_plan    - validates and writes plan.json; no Revit call by design
+#                     (a malformed plan is rejected in milliseconds, never
+#                     occupying Revit's UI thread)
+#   get_task_status - reads progress.json/ledger.ndjson from disk; must work
+#                     even while a slice is running or after a client timeout,
+#                     so it cannot depend on a live Revit round-trip
+#   rollback_task   - builds a compensation PLAN from recorded inverses on
+#                     disk; does not execute anything itself
+_FILESYSTEM_ONLY_TOOLS = frozenset(["propose_plan", "get_task_status", "rollback_task"])
+
 
 # ---------------------------------------------------------------------------
 # The registry itself: every real tool has an entry, every entry names a
@@ -96,7 +117,10 @@ def _normalize_path(p):
 
 def test_every_tool_calls_at_least_one_recognizable_endpoint():
     endpoints = ast_facts.all_tool_endpoints()
-    unresolved = [name for name, eps in endpoints.items() if not eps]
+    unresolved = [
+        name for name, eps in endpoints.items()
+        if not eps and name not in _FILESYSTEM_ONLY_TOOLS
+    ]
     assert not unresolved, (
         "tool(s) whose endpoint call(s) could not be statically resolved "
         "(ast_facts.extract_tool_endpoints doesn't yet handle however this "
@@ -137,17 +161,20 @@ def test_every_registered_route_is_called_by_at_least_one_tool():
 
 
 def test_tool_and_route_totals_are_equal():
-    """Not an assumption of 1:1 - a derived fact this repo happens to
-    satisfy today (51 tools, 51 routes, checked individually above). If a
-    future change makes this genuinely N:M, this specific equality check
-    is the one to relax, with a comment explaining the new shape - the
-    per-tool/per-route checks above are what actually matter."""
+    """Was a strict 1:1 (51 tools, 51 routes) until Phase A's
+    _FILESYSTEM_ONLY_TOOLS (see module top) made the relationship genuinely
+    N:M - relaxed exactly as this test's own original docstring anticipated.
+    The per-tool/per-route checks above still enforce the real invariant:
+    every tool that DOES call an endpoint maps to a real route, and every
+    route is called by at least one tool."""
     tools_total = len(ast_facts.all_tools())
     routes_total = len(ast_facts.all_routes())
-    assert tools_total == routes_total, (
-        "tool count (%d) and route count (%d) diverged - see the "
-        "per-tool/per-route tests above for exactly which side has the "
-        "extra or missing entries" % (tools_total, routes_total)
+    expected = routes_total + len(_FILESYSTEM_ONLY_TOOLS)
+    assert tools_total == expected, (
+        "tool count (%d) does not equal route count (%d) + filesystem-only "
+        "tool count (%d) = %d - see the per-tool/per-route tests above for "
+        "exactly which side has the extra or missing entries"
+        % (tools_total, routes_total, len(_FILESYSTEM_ONLY_TOOLS), expected)
     )
 
 

@@ -102,6 +102,11 @@ the change.
 
 ## Measured rate
 
-About `800` elements per second. An `18`-second budget is enough for about
-`14,000` elements before chunked work is needed. A typical course model (`76`–`142`
-elements) finishes in `0.9`–`2.3` seconds in a single pass.
+**Corrected from an earlier assumption of 800/s — actually measured (`tracker.py`
+lines ~1001-1004, 870 elements in 6044ms) at about `144` elements per second.**
+An `18`-second budget covers roughly `2,600` elements before chunked work is
+needed, not 14,000 — the earlier number understated the sizing of every
+budget decision made from it by roughly 5×. A typical course model (`76`–`142`
+elements) still finishes in `0.9`–`2.3` seconds in a single pass; that part
+was never in question, since it was measured directly rather than derived
+from the wrong rate.

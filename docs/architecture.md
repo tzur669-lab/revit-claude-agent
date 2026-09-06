@@ -37,7 +37,7 @@ AI Client (Claude Code)  →  MCP Server (Python 3.11+, FastMCP)  →  pyRevit R
 | `main.py` + `tools/` | CPython 3.11+ | The machine | MCP protocol, tool definitions |
 | `startup.py` + `revit_mcp/` | IronPython 2.7 | Inside the Revit process | route handlers, API calls |
 
-### 51 tools, seven categories
+### 57 tools, seven categories
 
 All tools take dimensions in millimeters — the conversion to feet, Revit's
 internal unit, happens inside the server. Revit versions 2024–2027 are supported
@@ -52,7 +52,7 @@ between versions, auto-detected at runtime — no manual configuration.
 | 8 | Analysis | `check_clashes` · `analyze_model_statistics` · `analyze_relationships` · `preview_delete_impact` · `validate_design` |
 | 2 | Documentation | `create_dimensions` · `export_document` |
 | 4 | Interop and save | `export_ifc` · `link_file` · `save_document` |
-| 1 | Advanced | `execute_revit_code` — run arbitrary IronPython inside Revit |
+| 7 | Advanced | `execute_revit_code` — run arbitrary IronPython inside Revit; `propose_plan` / `approve_plan` / `execute_plan` / `get_task_status` / `cancel_task` / `rollback_task` — the Phase A execution spine (see below) |
 
 `analyze_relationships` and `preview_delete_impact` (`revit_mcp/impact.py`) are the
 first deliverable past the Milestone 0–3 hard gate; `validate_design`
@@ -80,13 +80,14 @@ prepares data for Claude, not Claude acting in Revit.
 > This repo's fork fixes it where every route handler reads its request body:
 > `repair_hebrew_in()` (`revit_mcp/utils.py`) recursively repairs every string
 > in the parsed JSON payload before any field is read, and is called first
-> thing in all 20 handlers — the friendly tools (`create_room`, `place_family`,
-> `type_name`, `level_name`, ...) exactly as much as `execute_revit_code`. An
-> earlier attempt patched pyRevit core's own request handler instead; that does
-> not work, because pyRevit runs a route handler in a different engine scope
-> than the module that registers it (see the comment at the top of
-> `mcp-server/startup.py`) - the fix has to sit inside each handler, which is
-> why it is 20 near-identical call sites rather than one shared patch.
+> thing in 22 handler modules (up from 20 pre-Phase-A; `revit_mcp/plan_exec.py`
+> added three more call sites) — the friendly tools (`create_room`,
+> `place_family`, `type_name`, `level_name`, ...) exactly as much as
+> `execute_revit_code`. An earlier attempt patched pyRevit core's own request
+> handler instead; that does not work, because pyRevit runs a route handler in
+> a different engine scope than the module that registers it (see the comment
+> at the top of `mcp-server/startup.py`) - the fix has to sit inside each
+> handler, which is why it is per-module call sites rather than one shared patch.
 >
 > Text read **out** of Revit has a companion, older fix: `_safe_str` /
 > `normalize_string` / `sanitize_string` no longer strip non-ASCII to `?`. See
@@ -173,11 +174,18 @@ event is never seen in the same call that created it).
 
 > **gotcha — attribution**
 > The original detection looked for the string `MCP` in the transaction name. Of
-> the extension's 28 transactions, 23 carry `MCP` and 5 do not — so real Claude
-> work through the friendly tools was wrongly reported as `human`. The fix: a
-> closed list of five exact names, derived from the extension source and not
-> guessed, compared by exact match — because a wrong value here attributes human
-> work to us, the one mistake the system must not make.
+> the extension's transactions (30 today, up from 28 pre-Phase-A —
+> `revit_mcp/plan_exec.py` added the per-action and per-slice names), 25 carry
+> `MCP` and 5 do not — so real Claude work through the friendly tools was
+> wrongly reported as `human`. The fix: a closed list of five exact names,
+> derived from the extension source and not guessed, compared by exact match —
+> because a wrong value here attributes human work to us, the one mistake the
+> system must not make. Phase A's own transaction AND `TransactionGroup` names
+> (`"MCP Plan Action: …"` / `"MCP Plan Slice: … #…"`) both contain `MCP`
+> outright, so they need no addition to that closed list — guarded by
+> `tests/test_transaction_names.py`'s group-name check, since
+> `TransactionGroup` exposes no `GetTransactionNames()` for the tracker itself
+> to ever inspect.
 
 ### The tracker's build timeline
 
@@ -264,6 +272,74 @@ conversion did not touch `tracker.py` at all — the old and new formats sit on 
 of the same `snapshot.tsv`.
 
 </details>
+
+---
+
+## The execution spine: plan/task lifecycle
+
+Everything above this section is the command bus this repo started as: 57
+independent tools, each call forgotten the instant it returns. Phase A (built
+2026-09-06) adds the missing primitive — a durable, file-backed **task**
+that survives a client timeout, a paused slice, or Revit itself restarting —
+without touching how any of the 51 pre-existing tools behave.
+
+**The pipeline:** `propose_plan` (validate + hash, no Revit call) →
+`approve_plan` (advisory preflight against the live document, stamps
+identity) → `execute_plan` (one budgeted slice = one `DB.TransactionGroup`)
+→ `get_task_status` (reads disk, never Revit) → `rollback_task` (builds a
+compensation *plan* — never executes anything itself). Full contracts,
+the op table, and the TransactionGroup mechanics measured live before any
+of this was written live in
+[operation-contracts.md](operation-contracts.md#the-phase-a-execution-spine--propose_plan--approve_plan--execute_plan--get_task_status).
+
+**Where task state actually lives:** `~/.claude/revit-tracker/tasks/<task_id>/`
+— a sibling of the tracker's own `last_run.json`/`audit/`, not a new
+namespace. `ledger.ndjson` (append-only, one writer, fail-stop — an
+unrecordable mutation must never happen) is the single source of truth;
+`progress.json` is a pure, deterministic, disposable fold of it
+(`revit_mcp/task_store.py::fold_progress`) — losing the projection loses
+nothing, since `get_task_status` rebuilds it from the ledger on demand.
+
+**The idempotency fix worth naming on its own:**
+`DB.ElementTransformUtils.MoveElement` is *relative* — applying it twice
+moves twice. `revit_mcp/ops.py`'s `move_elements` op is rewritten *absolute*:
+it captures each target's point before moving, then applies
+`target − current` at run time, so re-running after a crash converges to the
+same place instead of accumulating. The four `create_*`/`place_family` ops
+cannot be made absolute the same way (creating a second element is never a
+no-op), so they classify as `"creating"` and require a `probe()` before ever
+resuming — an inconclusive probe blocks the task for a human rather than
+guessing whether a duplicate would result.
+
+**Six new tools, three genuinely different shapes.** `execute_plan` is the
+only one that mutates the model. `approve_plan` calls one read-only route
+(`/preflight_plan/`) to capture current document identity. `propose_plan`,
+`get_task_status`, and `rollback_task` never call Revit at all — they read
+and write the task's files directly, which is why they are the first tools
+in this project with no matching `@api.route(...)` at all
+(`tests/test_tool_registry.py::_FILESYSTEM_ONLY_TOOLS`, a relaxation that
+test file's own docstring anticipated by name before Phase A existed).
+
+> **gotcha — attribution one layer up from the tracker itself**
+> Measured live, 2026-09-06: moving a wall caused an adjacent room's boundary
+> to shift as a genuine side effect. The tracker's own `attribute()` correctly
+> recorded that room's uid as `"unknown"` (no DocumentChanged event tied to a
+> named transaction covers a derived geometry recompute) — not `"human"`. The
+> first version of `get_task_status`'s unexpected-change classifier
+> (`tools/plan_tools.py::_check_unexpected_changes`) collapsed `"unknown"`
+> into the same bucket as `"human"`/`"sync_incoming"` ("foreign"), which is
+> exactly the mistake `tracker.attribute()` is itself built never to make —
+> "unknown must never be upgraded to human," one layer down. Fixed to treat
+> only positive human/sync evidence as foreign; an uncertain or
+> claude-but-undeclared change now falls to `"unexpected"`, the honest
+> default. `tests/test_unexpected_changes.py` uses the real captured delta
+> from this exact incident as its regression fixture.
+
+**What is deliberately NOT built in this pass:** the semantic BIM graph
+(rooms→units→floors, adjacency), model health scoring, visual verification,
+and autonomous repair. The plan schema's `scope`, `success_criteria.evaluator`
+registry, and per-action `needs` are the extension points a later phase plugs
+into — none of them are read by anything in Phase A's own executor.
 
 ---
 
