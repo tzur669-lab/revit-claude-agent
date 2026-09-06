@@ -278,15 +278,127 @@ def test_bad_criterion_op_rejected():
     assert any("op must be one of" in e for e in errors)
 
 
+def _minimal_criterion(ev):
+    """A criterion satisfying evaluator ev's own arg contract and target
+    id-count exactly -- element_exists/element_absent take no extra args and
+    any non-empty id count; room_area_sqm/param_value need exactly 1 id;
+    distance_mm needs exactly 2."""
+    n = ops.EXACT_TARGET_COUNT.get(ev, 1)
+    c = {"id": "S1", "evaluator": ev, "target": {"kind": "element", "ids": list(range(1, n + 1))},
+         "op": "=="}
+    if ev in ("room_area_sqm", "distance_mm"):
+        c["value"] = 1
+    elif ev == "param_value":
+        c["parameter_name"] = "Comments"
+        c["value"] = "x"
+    return c
+
+
 def test_all_five_v1_evaluators_accepted():
     plan = _valid_plan()
     for ev in sorted(ops.EVALUATORS):
-        plan["success_criteria"] = [{
-            "id": "S1", "evaluator": ev, "target": {"kind": "element", "ids": [1]},
-            "op": "==", "value": 1,
-        }]
+        plan["success_criteria"] = [_minimal_criterion(ev)]
         ok, errors = ps.validate_plan(plan)
         assert ok, (ev, errors)
+
+
+def test_criterion_decorative_fields_are_tolerated():
+    """id/unit/tolerance/binding etc. are not part of any evaluator's arg
+    contract but are not rejected either -- the same descriptive-metadata
+    leniency constraints/assumptions/risks already get elsewhere in this
+    schema (their own id/source/evidence/severity fields are never
+    whitelisted), not the stricter top-level 'unknown key' discipline
+    validate_plan applies to the plan document itself."""
+    plan = _valid_plan()
+    c = _minimal_criterion("room_area_sqm")
+    c.update({"unit": "sqm", "tolerance": 0.05, "binding": True, "notes": "why this matters"})
+    plan["success_criteria"] = [c]
+    ok, errors = ps.validate_plan(plan)
+    assert ok, errors
+
+
+def test_missing_required_arg_rejected_per_evaluator():
+    for ev in ("room_area_sqm", "distance_mm", "param_value"):
+        plan = _valid_plan()
+        c = _minimal_criterion(ev)
+        # drop every required arg this evaluator declares
+        for key in ops.EVALUATOR_ARGS[ev]["required"]:
+            c.pop(key, None)
+        plan["success_criteria"] = [c]
+        ok, errors = ps.validate_plan(plan)
+        assert not ok, ev
+        assert any("missing required arg" in e for e in errors), (ev, errors)
+
+
+def test_value_must_be_a_number_not_a_bool_or_string():
+    plan = _valid_plan()
+    c = _minimal_criterion("room_area_sqm")
+    c["value"] = "12.5"  # a string, not a number
+    plan["success_criteria"] = [c]
+    ok, errors = ps.validate_plan(plan)
+    assert not ok
+    assert any("'value' must be a number" in e for e in errors)
+
+    plan2 = _valid_plan()
+    c2 = _minimal_criterion("distance_mm")
+    c2["value"] = True  # bool is not accepted as a number here either
+    plan2["success_criteria"] = [c2]
+    ok2, errors2 = ps.validate_plan(plan2)
+    assert not ok2
+    assert any("'value' must be a number" in e for e in errors2)
+
+
+def test_parameter_name_must_be_a_non_empty_string():
+    plan = _valid_plan()
+    c = _minimal_criterion("param_value")
+    c["parameter_name"] = ""
+    plan["success_criteria"] = [c]
+    ok, errors = ps.validate_plan(plan)
+    assert not ok
+    assert any("'parameter_name' must be" in e for e in errors)
+
+
+def test_allow_type_fallback_must_be_a_bool():
+    plan = _valid_plan()
+    c = _minimal_criterion("param_value")
+    c["allow_type_fallback"] = "yes"
+    plan["success_criteria"] = [c]
+    ok, errors = ps.validate_plan(plan)
+    assert not ok
+    assert any("'allow_type_fallback' must be a bool" in e for e in errors)
+
+
+def test_distance_mm_requires_exactly_two_target_ids():
+    for n in (1, 3):
+        plan = _valid_plan()
+        c = _minimal_criterion("distance_mm")
+        c["target"]["ids"] = list(range(1, n + 1))
+        plan["success_criteria"] = [c]
+        ok, errors = ps.validate_plan(plan)
+        assert not ok, n
+        assert any("exactly 2 id(s)" in e for e in errors), (n, errors)
+
+
+def test_room_area_sqm_and_param_value_require_exactly_one_target_id():
+    for ev in ("room_area_sqm", "param_value"):
+        plan = _valid_plan()
+        c = _minimal_criterion(ev)
+        c["target"]["ids"] = [1, 2]
+        plan["success_criteria"] = [c]
+        ok, errors = ps.validate_plan(plan)
+        assert not ok, ev
+        assert any("exactly 1 id(s)" in e for e in errors), (ev, errors)
+
+
+def test_empty_target_ids_rejected_for_every_evaluator():
+    for ev in sorted(ops.EVALUATORS):
+        plan = _valid_plan()
+        c = _minimal_criterion(ev)
+        c["target"]["ids"] = []
+        plan["success_criteria"] = [c]
+        ok, errors = ps.validate_plan(plan)
+        assert not ok, ev
+        assert any("target.ids must be a non-empty list" in e for e in errors), (ev, errors)
 
 
 # ---------------------------------------------------------------------------

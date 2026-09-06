@@ -25,6 +25,7 @@ owns every Start()/commit_verified()/RollBack()/Assimilate() call.
 """
 from pyrevit import routes, revit, DB
 
+import evaluators
 import ops
 import refs
 import task_store
@@ -525,6 +526,24 @@ def register_plan_routes(api):
 
                 policy = plan.get("policy") or {"on_action_failure": "abort", "on_verify_failure": "abort"}
                 slice_result = _run_slice(doc, task_id, task_dir, plan, policy, budget_ms)
+
+                if slice_result["outcome"] == "completed":
+                    # success_criteria describe the PLAN's end state, not one
+                    # budgeted slice of it -- evaluated exactly once, here,
+                    # after every action has committed and this slice's
+                    # TransactionGroup has already Assimilate()d, so `doc` is
+                    # the fully-regenerated, final committed state, the same
+                    # assumption every other post-commit verify() in this
+                    # codebase already makes. Read-only, no transaction (see
+                    # tests/test_evaluators_no_transactions.py). Written
+                    # BEFORE the "finished" transition below so design_ok is
+                    # already foldable in this same response. A "completed"
+                    # outcome with design_ok False is a legitimate, disclosed
+                    # terminal state -- this does not escalate to "failed";
+                    # execution/verification/design stay orthogonal.
+                    criteria_results = evaluators.evaluate_success_criteria(doc, plan)
+                    for cr in criteria_results:
+                        task_store.append_ledger(task_dir, dict(cr, kind="criterion"))
 
                 outcome_map = {"completed": "completed", "failed": "failed", "cancelled": "aborted"}
                 if slice_result["outcome"] in outcome_map:

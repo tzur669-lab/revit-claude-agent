@@ -56,6 +56,21 @@ import os
 import time
 import uuid
 
+# eval_support.py is ALSO Revit-API-free (same reason, same guarantee), so
+# importing it here does not compromise this module's own "no pyrevit/DB/doc
+# anywhere" invariant -- it stays a pure, offline-importable module either
+# way. The try/except covers all three of this module's own import contexts
+# (see this module's docstring): the bare form resolves under an IronPython
+# route handler and under CPython's `import_revit_mcp_module`-style test
+# helpers (revit_mcp/ itself on sys.path); the dotted fallback resolves
+# under execute_revit_code's exec() namespace (measured live: bare sibling
+# imports do not resolve there) and under a plain `from revit_mcp import
+# task_store` with only mcp-server/ on sys.path.
+try:
+    from eval_support import aggregate_design_ok
+except ImportError:
+    from revit_mcp.eval_support import aggregate_design_ok
+
 try:
     import System
     _HAS_SYSTEM = True
@@ -394,6 +409,7 @@ LEDGER_SCHEMA_V = 1
 KNOWN_LEDGER_KINDS = frozenset([
     "task_meta", "state", "outcome_amend", "slice_open", "action_begin",
     "stage", "action_end", "slice_close", "verdict", "note", "preflight",
+    "criterion",
 ])
 
 
@@ -517,6 +533,7 @@ def fold_progress(records):
     canon = None
     slices = []
     actions = {}
+    criteria = []
     cur_slice = None
     unknown_kinds = set()
     higher_lv_seen = set()
@@ -596,6 +613,20 @@ def fold_progress(records):
                 cur_slice["elapsed_ms"] = rec.get("elapsed_ms")
                 slices.append(cur_slice)
                 cur_slice = None
+        elif kind == "criterion":
+            # Written once per success_criteria entry, after the whole plan
+            # reaches outcome "completed" (plan_exec.py) -- never updated,
+            # unlike an action's begin/end pair, so a plain append is
+            # correct; explicit field list rather than splatting the whole
+            # record, matching this function's own action_begin/action_end
+            # handling (never blindly trust ledger content beyond named
+            # fields).
+            criteria.append({
+                "k": rec.get("k"), "evaluator": rec.get("evaluator"), "op": rec.get("op"),
+                "target": rec.get("target"), "expected": rec.get("expected"),
+                "actual": rec.get("actual"), "status": rec.get("status"), "ok": rec.get("ok"),
+                "reason": rec.get("reason"), "used_type_fallback": rec.get("used_type_fallback"),
+            })
         # verdict / note / preflight: intentionally not folded here.
 
     if cur_slice is not None:
@@ -638,6 +669,14 @@ def fold_progress(records):
     else:
         verification_ok = None
 
+    ordered_criteria = sorted(criteria, key=lambda c: c["k"])
+    # aggregate_design_ok([]) already returns None (its own documented
+    # "nothing declared/evaluated" rule) -- no separate empty-list branch
+    # needed here. Defined once in eval_support.py and called from there
+    # rather than re-derived inline, so this rule cannot drift from the one
+    # tested directly in tests/test_eval_support.py.
+    design_ok = aggregate_design_ok(ordered_criteria)
+
     return {
         "v": SCHEMA_V,
         "task_id": task_id,
@@ -652,10 +691,11 @@ def fold_progress(records):
         "current_action": current_action,
         "slices": slices,
         "actions": ordered,
+        "criteria": ordered_criteria,
         "counts": {"total": total, "done": done, "failed": failed,
                    "skipped": skipped, "pending": pending},
         "verdicts": {"execution_ok": execution_ok,
-                     "verification_ok": verification_ok, "design_ok": None},
+                     "verification_ok": verification_ok, "design_ok": design_ok},
         "unknown_ledger_kinds": sorted(unknown_kinds),
         "higher_ledger_schema_seen": sorted(higher_lv_seen),
         "updated_epoch": epoch_now(),

@@ -98,6 +98,13 @@ def commit_verified(t):
 # constant; a starting tolerance to be refined from measured behaviour.
 PARAM_DOUBLE_TOLERANCE = 1e-6
 
+# Exact: 1 ft = 0.3048 m, so 1 sqft = 0.3048**2 sqm. The single canonical
+# copy -- rooms.py and validation.py each used to carry their own
+# independently-drifted approximation (0.092903 and 0.0929 respectively,
+# found during Phase B slice 1's audit); both now import this one constant
+# instead, so the two values cannot silently diverge again.
+SQFT_TO_SQM = 0.3048 ** 2
+
 
 def param_read_matches(param, storage_type, intended):
     """Re-read a parameter's CURRENT value and compare it to the typed value
@@ -183,6 +190,36 @@ def read_param_typed(param):
         return st, ""
     except Exception:
         return None, ""
+
+
+def read_param_native(param):
+    """(storage_type, native_value) -- the same four-branch StorageType
+    dispatch read_param_typed uses, but returning the parameter's REAL
+    Python value (float/int/str/int element-id) instead of a display
+    string. read_param_typed's string form exists for old-value AUDIT
+    CAPTURE (a human-readable record of what a value used to be);
+    param_read_matches compares a parameter against an ALREADY-KNOWN
+    intended value. This is the third, previously-missing shape: read a
+    parameter's own value to compare against something not yet known
+    (revit_mcp/evaluators.py's param_value evaluator). Performs NO unit
+    conversion -- a Double's value is Revit's raw internal unit (feet for
+    length, sqft for area, cubic feet for volume, radians for angle),
+    identically to set_param_typed's existing contract, so a value written
+    by set_parameters and read back here agree on units by construction.
+    (None, None) on failure."""
+    try:
+        st = param.StorageType
+        if st == DB.StorageType.String:
+            return st, (param.AsString() or "")
+        elif st == DB.StorageType.Integer:
+            return st, param.AsInteger()
+        elif st == DB.StorageType.Double:
+            return st, param.AsDouble()
+        elif st == DB.StorageType.ElementId:
+            return st, get_element_id_value(param.AsElementId())
+        return st, None
+    except Exception:
+        return None, None
 
 
 def set_param_typed(param, value):

@@ -66,11 +66,10 @@ import logging
 import os
 import traceback
 
-from utils import get_element_id_value, make_element_id, repair_hebrew_in, normalize_string
+from utils import get_element_id_value, make_element_id, repair_hebrew_in, normalize_string, SQFT_TO_SQM
 
 logger = logging.getLogger(__name__)
 
-SQFT_TO_SQM = 0.0929
 CUFT_TO_CUM = 0.0283168
 MM_PER_FT = 304.8
 

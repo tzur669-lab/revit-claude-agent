@@ -476,6 +476,64 @@ at propose time, which `propose_plan` deliberately does not make). Each op's
 own `capture()`/`verify()` cycle provides a partial, not complete, safety net
 on top of this.
 
+### Success-criteria evaluators (Phase B, slice 1 — `revit_mcp/evaluators.py`,
+### `revit_mcp/eval_support.py`, data twin `tools/ops_schema.py::EVALUATOR_ARGS`)
+
+Where the v1 ops answer "did this action do what it claimed," the 5
+evaluators answer a different question: "does the plan's own stated design
+goal hold against the model's final state." Evaluated exactly once per
+task, read-only, right after the last slice reaches `outcome: "completed"`
+and its `TransactionGroup` has already `Assimilate()`d.
+
+| evaluator | args (beyond `target`, `op`) | reuses |
+|---|---|---|
+| `element_exists` | — | `utils.verify_elements_exist` |
+| `element_absent` | — | `editing.verify_delete` (already `method: "element_absent"`) |
+| `room_area_sqm` | `value` (number) | `utils.SQFT_TO_SQM` (exact: `0.3048**2`) |
+| `distance_mm` | `value` (number) | `DB.LocationPoint` only — no bounding-box fallback |
+| `param_value` | `parameter_name`, `value`, optional `allow_type_fallback` | `utils.resolve_param`/`read_param_native` — **no unit conversion** |
+
+**Every result is one of 8 named statuses**, never a bare tri-state:
+`passed | failed | invalid_reference | wrong_category | missing_parameter |
+unsupported_type | unsupported_geometry | evaluator_error`. `ok` is
+*derived* from `status` (`{"passed": True, "failed": False}`, else `None`),
+never set independently. Full result shape: `{k, evaluator, op, target,
+expected, actual, status, ok, reason, used_type_fallback}` —
+`used_type_fallback` is always present (default `False`), not only for
+`param_value`, so a caller never needs a key-missing-vs-`False` distinction.
+
+**`param_value` performs NO unit conversion**, by design, not omission:
+grepped for `UnitUtils`/`ForgeTypeId`/`ConvertToInternalUnits` across the
+whole tree — zero matches. `set_parameters` (the op that would have written
+the value a criterion later checks) already has the shipped contract "a
+Double's JSON value is Revit's own raw internal unit" — `param_value` makes
+the identical contract so a value written and read back agree by
+construction, and a mismatched operator/value-type (`>=` against a String)
+returns `status: "unsupported_type"` (`eval_support.compare`) rather than
+raising or silently passing. `room_area_sqm` (sqm) and `distance_mm` (mm)
+convert on purpose — their unit is part of the evaluator's own name.
+
+**`distance_mm` requires a real `DB.LocationPoint` on both targets** — a
+bounding-box-center fallback was deliberately rejected (an axis-aligned bbox
+has no consistent physical meaning across categories); a curve-based
+element (a wall) returns `"unsupported_geometry"`, never an approximated
+number.
+
+**`design_ok`** (`eval_support.aggregate_design_ok`, called identically from
+`fold_progress`, unit-tested directly so the ledger fold cannot drift from
+the tested rule): no criteria → `None`. Any `"failed"` → `False` (dominates
+an unrelated unknown). Else any non-`"passed"` status present (including
+`"evaluator_error"`) → `None`. Only "every criterion passed" → `True`. A
+`"completed"` task with `design_ok: False` is a legitimate, disclosed
+terminal state — this never escalates the task's own outcome to `"failed"`.
+
+**Known, disclosed limitation:** a criterion can only target an element
+whose id is known at propose time — not one a plan's own action creates
+(the same limitation `expected_changes.created` already has; see the "Known
+gap" note above). No new ref kinds — a Room/Level is already addressable
+through the existing `"element"` kind; `unit`/`zone` have no existing
+concept anywhere in this codebase to build one from.
+
 ---
 
 ## Read-only and dry-run operations — a third contract, not level 1/2

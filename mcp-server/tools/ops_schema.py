@@ -37,10 +37,40 @@ FIDELITY_LEVELS = frozenset(["exact", "approximate", "compensatable", "irreversi
 # An op always mutates, so its risk is a subset of tools/registry.py's
 # RISK_LEVELS that excludes "read" -- there is no read-only op.
 RISK_LEVELS = frozenset(["additive", "modifying", "destructive"])
-REF_KINDS = frozenset(["element"])  # Phase B adds room/unit/level/zone/...
-EVALUATORS = frozenset([
-    "room_area_sqm", "param_value", "element_exists", "element_absent", "distance_mm",
-])
+REF_KINDS = frozenset(["element"])  # Phase B, slice 1 found no evidence a room/unit/
+# level/zone ref kind is actually needed: a Room and a Level are both
+# ordinary elements with an ElementId already, addressable today through
+# this one kind. "unit"/"zone" have no existing concept anywhere in this
+# codebase or model (see docs/architecture.md's Phase B section) -- not
+# built here, disclosed rather than invented.
+
+# success_criteria evaluators (Phase B, slice 1 -- revit_mcp/evaluators.py is
+# the runtime implementation; this is the same data-only CPython twin
+# relationship OPS/ops.py already have). Each entry is the evaluator's own
+# arg contract, exactly like _op()'s "args" sub-shape above -- so
+# plan_schema.py validates a criterion's fields by lookup, not a growing
+# if/elif chain.
+EVALUATOR_ARGS = {
+    # element_exists / element_absent operate on target.ids as a batch (>=1
+    # id, no upper bound) -- no evaluator-specific args beyond the target.
+    "element_exists": {"required": (), "optional": ()},
+    "element_absent": {"required": (), "optional": ()},
+    # room_area_sqm / distance_mm: the unit is part of the evaluator's OWN
+    # name (sqm, mm) -- "value" is the only extra arg needed.
+    "room_area_sqm": {"required": ("value",), "optional": ()},
+    "distance_mm": {"required": ("value",), "optional": ()},
+    # param_value performs NO unit conversion -- "value" must already be in
+    # Revit's raw internal units, identically to set_parameters' own
+    # existing contract (see docs/operation-contracts.md).
+    "param_value": {"required": ("parameter_name", "value"), "optional": ("allow_type_fallback",)},
+}
+EVALUATORS = frozenset(EVALUATOR_ARGS.keys())  # unchanged name/shape for existing callers
+
+# Evaluators whose target must resolve to an EXACT number of ids (not just
+# "at least one") -- room_area_sqm/param_value each need exactly the one
+# element they inspect; distance_mm is inherently pairwise. Pure JSON-shape
+# data, checked against len(target["ids"]) at propose time, no Revit call.
+EXACT_TARGET_COUNT = {"room_area_sqm": 1, "param_value": 1, "distance_mm": 2}
 
 
 def _op(risk, idempotency, fidelity, required, optional, registry_tool):

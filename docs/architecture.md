@@ -335,11 +335,98 @@ test file's own docstring anticipated by name before Phase A existed).
 > default. `tests/test_unexpected_changes.py` uses the real captured delta
 > from this exact incident as its regression fixture.
 
-**What is deliberately NOT built in this pass:** the semantic BIM graph
+**What is deliberately NOT built in Phase A:** the semantic BIM graph
 (rooms→units→floors, adjacency), model health scoring, visual verification,
-and autonomous repair. The plan schema's `scope`, `success_criteria.evaluator`
-registry, and per-action `needs` are the extension points a later phase plugs
-into — none of them are read by anything in Phase A's own executor.
+and autonomous repair. The plan schema's `scope` and per-action `needs` are
+extension points a later phase plugs into — neither is read by anything in
+Phase A's own executor. `success_criteria.evaluator` **was** on this list;
+Phase B, slice 1 (below) wires it up for real.
+
+### Phase B, slice 1: success criteria become real
+
+Phase A validated `success_criteria` for shape and never ran one —
+`design_ok` (the third leg of the execution/verification/design verdict
+triple) was a hardcoded `None`. Built 2026-09-06, following the same
+audit-first discipline as Phase A: the plan's own first draft was
+adversarially reviewed and revised before implementation over unit
+ambiguity, a misleading distance fallback, and a two-state result that
+would have hidden infrastructure errors behind a legitimate "not checked"
+outcome — see `revit_mcp/evaluators.py`'s and `revit_mcp/eval_support.py`'s
+own module docstrings for the resolved reasoning, not repeated here.
+
+**The 5 v1 evaluators** (`element_exists`, `element_absent`, `room_area_sqm`,
+`param_value`, `distance_mm`), each `(doc, criterion) -> eval_support.
+make_result(...)`, one of **8 named statuses** — `passed | failed |
+invalid_reference | wrong_category | missing_parameter | unsupported_type |
+unsupported_geometry | evaluator_error` — never a bare tri-state that hides
+*why* behind free text. `ok` is derived from `status`, never set
+independently, so the two can never disagree. `element_exists`/
+`element_absent` are thin wrappers over the already-shipped
+`utils.verify_elements_exist`/`editing.verify_delete` (the latter's
+`method` was already the literal string `"element_absent"`); the other
+three are new.
+
+**Unit contract, deliberately not uniform across evaluators, because
+uniformity here would be dishonest:** grepped the whole tree for
+`UnitUtils`/`ForgeTypeId`/`ConvertToInternalUnits` — zero matches anywhere,
+meaning `set_parameters` already has a shipped, live contract that a
+Double parameter's JSON value is Revit's own raw internal unit, no
+conversion. `param_value` makes the identical contract (a value it wrote
+and a criterion that reads it back must agree on units by construction) —
+inventing conversion for `param_value` alone would create a disagreement
+with its own writer, not fix one. `room_area_sqm` (sqm) and `distance_mm`
+(mm) convert on purpose: their unit is part of the evaluator's own *name*,
+not an assumption about a parameter they've never seen. A mismatched
+operator/value-type (`>=` against a String) returns `status:
+"unsupported_type"` rather than raising or silently passing.
+
+**`distance_mm` has no bounding-box-center fallback**, by design: a bbox is
+an axis-aligned artifact with no consistent physical meaning across
+categories (an L-shaped room's own bbox center can sit outside the room).
+Only `DB.LocationPoint`-bearing elements (point-placed families, Rooms) are
+supported; a curve-based element (a wall) returns `"unsupported_geometry"`,
+never an approximated number.
+
+**`design_ok` aggregation** (`eval_support.aggregate_design_ok`, called
+identically from `revit_mcp/task_store.py::fold_progress` and unit-tested
+directly): no criteria evaluated → `None`. Any `"failed"` present → `False`
+— a confirmed violation dominates an unrelated unknown, never softened.
+Else any non-`"passed"` status (including `"evaluator_error"`) → `None`,
+never promoted to `True` by an unrelated criterion passing. Only "every
+criterion passed" → `True`. A `"completed"` task with `design_ok: False` is
+a legitimate, disclosed terminal state — execution/verification/design stay
+orthogonal, exactly as `execution_ok`/`verification_ok` already were.
+Evaluated exactly once per task, in `execute_plan_handler` right after the
+slice reaches `"completed"` and its `TransactionGroup` has already
+`Assimilate()`d — read-only, no transaction
+(`tests/test_evaluators_no_transactions.py` is an AST guard for exactly
+this, the same technique `test_ops_no_transactions.py` already uses).
+
+**Live-verified end-to-end** through the real `plan_exec.py`/`task_store.py`
+functions against the running model: a plan set an existing wall's
+`Comments` parameter, then checked it back (`param_value`, passed), an
+unrelated room's real area against a deliberately-wrong threshold
+(`room_area_sqm`, failed), and both elements' existence (`element_exists`,
+passed) — `design_ok` folded to `False`, correctly dominated by the one
+real failure, with the passing criteria still individually visible. The
+mutation was reverted and confirmed net-zero by the tracker's own diff
+immediately after. One real, IronPython-specific quirk surfaced only by
+this live test, not the offline suite: after `del sys.modules[...]`,
+`from revit_mcp import task_store` can still resolve to a **stale** module
+if the `revit_mcp` package object retains a leftover `task_store` attribute
+from an earlier import — deleting the `sys.modules` entry alone is not
+enough; the parent package's own attribute must be cleared too. Purely a
+verification-script gotcha (the shipped module content was already
+correct), not a product bug — noted here because it will bite the next
+live fresh-reimport test that doesn't know to clear both.
+
+**Known, disclosed limitations, not solved here:** a criterion can only
+target an element whose id is known at propose time — not one a plan's own
+action creates (the same limitation `expected_changes.created` already
+has). No new ref kinds (`room`/`unit`/`level`/`zone`) — a Room and a Level
+are both ordinary elements already addressable through the one existing
+`"element"` kind; `unit`/`zone` have no existing concept anywhere in this
+codebase or model, so nothing was invented for them.
 
 ---
 

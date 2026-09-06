@@ -4,7 +4,7 @@ Rooms Module for Revit MCP
 Handles room creation and room separation lines
 """
 
-from utils import get_element_name, get_element_id_value, make_element_id, suppress_warnings, repair_hebrew_in, commit_verified, verify_created_elements
+from utils import get_element_name, get_element_id_value, make_element_id, suppress_warnings, repair_hebrew_in, commit_verified, verify_created_elements, SQFT_TO_SQM
 from pyrevit import routes, revit, DB
 from System.Collections.Generic import List
 import json
@@ -75,7 +75,7 @@ def read_room_facts(doc, room_id):
     try:
         area_param = room_after.LookupParameter("Area")
         if area_param and area_param.HasValue:
-            area = round(area_param.AsDouble() * 0.092903, 2)  # sq ft to sq m
+            area = round(area_param.AsDouble() * SQFT_TO_SQM, 2)  # sq ft to sq m
     except Exception:
         pass
     name = ""

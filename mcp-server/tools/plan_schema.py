@@ -143,6 +143,22 @@ def _validate_actions(actions):
 
 
 def _validate_success_criteria(sc):
+    """Shape-only, zero Revit access (CPython validates the document; Revit
+    validates the world -- see this module's own docstring). Beyond the
+    evaluator/op/target checks that already existed, this also validates
+    each evaluator's own arg contract (ops_schema.EVALUATOR_ARGS) and target
+    id-count (ops_schema.EXACT_TARGET_COUNT) -- pure JSON-shape checks, no
+    Revit call. Deliberately NOT applying validate_plan's top-level
+    unknown-key rejection here: constraints/assumptions/risks already tolerate
+    free-form descriptive fields (id, source, evidence, severity...)
+    elsewhere in this same schema, and a criterion's own id/unit/tolerance/
+    binding-style metadata gets the same leniency, not the plan's own
+    stricter document-level discipline.
+
+    Operator-vs-actual-value-type compatibility (e.g. ">=" against a String
+    parameter) is NOT checked here -- CPython never sees the live
+    parameter's StorageType at propose time. That check is deferred to
+    revit_mcp.eval_support.compare() at evaluation time."""
     errors = []
     if not isinstance(sc, list):
         return ["success_criteria must be a list"]
@@ -150,19 +166,66 @@ def _validate_success_criteria(sc):
         if not isinstance(c, dict):
             errors.append("success_criteria[%d] is not an object" % idx)
             continue
+
         ev = c.get("evaluator")
-        if ev not in ops_schema.EVALUATORS:
+        ev_spec = ops_schema.EVALUATOR_ARGS.get(ev)
+        if ev_spec is None:
             errors.append(
                 "success_criteria[%d]: unknown evaluator %r (known: %s)"
                 % (idx, ev, sorted(ops_schema.EVALUATORS))
             )
+
         if c.get("op") not in CRITERION_OPS:
             errors.append("success_criteria[%d]: op must be one of %s"
                            % (idx, sorted(CRITERION_OPS)))
+
         target = c.get("target")
+        target_ids = None
         if not isinstance(target, dict) or target.get("kind") not in REF_KINDS:
             errors.append("success_criteria[%d]: target.kind must be one of %s"
                            % (idx, sorted(REF_KINDS)))
+        else:
+            target_ids = target.get("ids")
+            if not isinstance(target_ids, list) or not target_ids:
+                errors.append("success_criteria[%d]: target.ids must be a non-empty list" % idx)
+                target_ids = None
+
+        if ev_spec is None:
+            continue  # nothing more to check against an unknown evaluator's own arg contract
+
+        missing = set(ev_spec["required"]) - set(c.keys())
+        if missing:
+            errors.append("success_criteria[%d] (evaluator=%r): missing required arg(s) %s"
+                           % (idx, ev, sorted(missing)))
+
+        # room_area_sqm/distance_mm's "value" is always numeric -- the unit is
+        # part of the evaluator's own name. param_value's "value" is NOT
+        # required to be numeric: it is compared against whatever StorageType
+        # the target parameter actually has (String/Integer/Double/ElementId),
+        # which CPython cannot know at propose time -- see eval_support.compare.
+        if ev in ("room_area_sqm", "distance_mm") and "value" in c:
+            v = c.get("value")
+            if isinstance(v, bool) or not isinstance(v, (int, float)):
+                errors.append("success_criteria[%d] (evaluator=%r): 'value' must be a number, got %r"
+                               % (idx, ev, v))
+
+        if "parameter_name" in ev_spec["required"] and "parameter_name" in c:
+            pn = c.get("parameter_name")
+            if not isinstance(pn, str) or not pn:
+                errors.append("success_criteria[%d] (evaluator=%r): 'parameter_name' must be a "
+                               "non-empty string" % (idx, ev))
+
+        if "allow_type_fallback" in c and not isinstance(c["allow_type_fallback"], bool):
+            errors.append("success_criteria[%d] (evaluator=%r): 'allow_type_fallback' must be a bool"
+                           % (idx, ev))
+
+        exact_n = ops_schema.EXACT_TARGET_COUNT.get(ev)
+        if exact_n is not None and target_ids is not None and len(target_ids) != exact_n:
+            errors.append(
+                "success_criteria[%d] (evaluator=%r): target.ids must have exactly %d id(s), got %d"
+                % (idx, ev, exact_n, len(target_ids))
+            )
+
     return errors
 
 

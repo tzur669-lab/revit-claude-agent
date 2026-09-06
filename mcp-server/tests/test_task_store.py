@@ -250,6 +250,62 @@ def test_fold_execution_ok_null_while_actions_pending():
     assert p["current_action"] == 0
 
 
+def test_fold_design_ok_none_with_no_criterion_records():
+    p = ts.fold_progress([{"kind": "action_begin", "i": 0, "op": "x"}])
+    assert p["verdicts"]["design_ok"] is None
+    assert p["criteria"] == []
+
+
+def test_fold_design_ok_true_when_all_criteria_passed():
+    records = [
+        {"kind": "criterion", "k": 0, "evaluator": "room_area_sqm", "op": ">=", "status": "passed",
+         "ok": True, "expected": 9.0, "actual": 9.5, "reason": None, "used_type_fallback": False},
+        {"kind": "criterion", "k": 1, "evaluator": "element_exists", "op": "==", "status": "passed",
+         "ok": True, "expected": None, "actual": None, "reason": None, "used_type_fallback": False},
+    ]
+    p = ts.fold_progress(records)
+    assert p["verdicts"]["design_ok"] is True
+    assert [c["k"] for c in p["criteria"]] == [0, 1]
+
+
+def test_fold_design_ok_delegates_to_eval_support_aggregate_design_ok():
+    """Not a reimplementation of eval_support's own aggregation tests --
+    just proving fold_progress calls through to the one real function
+    (failure dominates an unrelated unknown), so the two cannot drift
+    apart. The full rule matrix is tested directly in
+    tests/test_eval_support.py."""
+    records = [
+        {"kind": "criterion", "k": 0, "evaluator": "room_area_sqm", "op": ">=", "status": "failed",
+         "ok": False, "expected": 50.0, "actual": 9.5, "reason": None, "used_type_fallback": False},
+        {"kind": "criterion", "k": 1, "evaluator": "param_value", "op": "==", "status": "missing_parameter",
+         "ok": None, "expected": "x", "actual": None, "reason": "not found", "used_type_fallback": False},
+    ]
+    p = ts.fold_progress(records)
+    assert p["verdicts"]["design_ok"] is False  # failed dominates the unrelated unknown
+
+
+def test_fold_criteria_are_ordered_by_k_regardless_of_ledger_order():
+    records = [
+        {"kind": "criterion", "k": 1, "evaluator": "b", "op": "==", "status": "passed", "ok": True,
+         "expected": None, "actual": None, "reason": None, "used_type_fallback": False},
+        {"kind": "criterion", "k": 0, "evaluator": "a", "op": "==", "status": "passed", "ok": True,
+         "expected": None, "actual": None, "reason": None, "used_type_fallback": False},
+    ]
+    p = ts.fold_progress(records)
+    assert [c["evaluator"] for c in p["criteria"]] == ["a", "b"]
+
+
+def test_summarize_for_response_carries_criteria_and_design_ok_through_unbounded():
+    records = [
+        {"kind": "criterion", "k": 0, "evaluator": "room_area_sqm", "op": ">=", "status": "passed",
+         "ok": True, "expected": 9.0, "actual": 9.5, "reason": None, "used_type_fallback": False},
+    ]
+    p = ts.fold_progress(records)
+    out = ts.summarize_for_response(p)
+    assert out["criteria"] == p["criteria"]
+    assert out["verdicts"]["design_ok"] is True
+
+
 def test_summarize_for_response_bounds_size_and_keeps_failures():
     actions = [{"i": i, "status": "done"} for i in range(30)]
     actions[5]["status"] = "failed"  # outside the last-10 tail
