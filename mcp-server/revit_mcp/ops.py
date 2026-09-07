@@ -15,7 +15,14 @@ anything), so the signature is uniform rather than special-cased per op:
     run:     fn(doc, args, targets, before) -> result
     verify:  fn(doc, args, targets, before, result) -> verified_dict
     inverse: fn(args, targets, before, result) -> action_dict | None   (PURE -- no doc)
-    probe:   fn(doc, args, before) -> "not_applied" | "applied" | "unknown"
+    probe:   fn(doc, args, before) -> (outcome, recovered_ids, reason)
+             outcome in "not_applied" | "applied" | "unknown"; recovered_ids
+             is a list of ints only when outcome == "applied", else None;
+             reason is one of eval_support.PROBE_REASONS. This is
+             consulted only as Level-3 fallback (plan_exec.py's
+             _classify_open_action checks a "commit_result" ledger record
+             -- Level-1 authoritative evidence -- first; see Phase B slice
+             3 in docs/architecture.md).
 
 `inverse` is called twice in practice, by plan_exec.py:
   - for "absolute" ops, right after capture() and BEFORE the transaction
@@ -39,6 +46,7 @@ this file's central idempotency fix.
 from pyrevit import DB
 import editing
 import building
+import eval_support
 import placement
 import rooms
 import transforms
@@ -386,8 +394,28 @@ def _room_at_point(doc, point_mm):
     return get_element_id_value(room.Id) if room is not None else None
 
 
+def _room_universe(doc):
+    """{str(id): [area_sqft]} for every Room element -- Phase B slice 3's
+    universe-diff safety net, applied to create_room too (see _room_probe's
+    docstring for the false-'applied' path this closes). An existing
+    room's area changing during the crash window (its boundary was edited
+    by someone/something else) is a real, relevant change, flagged the
+    same conservative way as every other creating op -- not a case
+    reserved for the other three ops only."""
+    out = {}
+    all_rooms = DB.FilteredElementCollector(doc).OfCategory(DB.BuiltInCategory.OST_Rooms) \
+        .WhereElementIsNotElementType().ToElements()
+    for r in all_rooms:
+        rid = str(get_element_id_value(r.Id))
+        try:
+            out[rid] = [round(float(r.Area), 6)]
+        except Exception:
+            out[rid] = None
+    return out
+
+
 def _room_capture(doc, args, targets):
-    return {"existing_room_id": _room_at_point(doc, args.get("point_mm"))}
+    return {"universe": _room_universe(doc)}
 
 
 def _room_run(doc, args, targets, before):
@@ -417,29 +445,106 @@ def _room_inverse(args, targets, before, result):
 
 
 def _room_probe(doc, args, before):
-    """(outcome, recovered_ids) -- applied: a room now exists at the point
-    that did not at capture time, and recovered_ids is [that room's id],
-    since GetRoomAtPoint already resolved the real element as part of
-    making this determination (Phase B slice 2: this used to discard that
-    id, forcing a later created_by reference to a probe-skipped create_room
-    into invalid_reference even though the room was right there). not_applied:
-    same as capture time, recovered_ids is None. unknown: anything else
-    (including no point_mm to test at all) -- never guessed, recovered_ids
-    is None."""
-    if before is None:
-        return "unknown", None
+    """(outcome, recovered_ids, reason) -- Phase B slice 3 (B2 fix): the
+    original version of this probe compared only `GetRoomAtPoint`'s
+    result before vs. after (current_id == was_id). That cannot
+    distinguish "a NEW room was created here" from "a PRE-EXISTING room
+    started reaching this point because its boundary changed elsewhere
+    during the crash window" -- the second case would have reported
+    ("applied", [that pre-existing room's id]), a false positive handing
+    a wrong id to a later created_by reference. The universe-diff
+    (eval_support.probe_outcome_from_universe) closes this: a pre-existing
+    room is already a member of the captured room universe (_room_universe)
+    regardless of whether it used to cover this point, so it can never be
+    the "new since capture" element `applied` requires. GetRoomAtPoint is
+    still used, but only to decide which of the genuinely-new rooms (if
+    any) is the one AT this point -- not as the sole signal."""
+    if before is None or "universe" not in before:
+        return "unknown", None, "no_capture"
+    current_universe = _room_universe(doc)
     current_id = _room_at_point(doc, args.get("point_mm"))
-    was_id = before.get("existing_room_id")
-    if current_id == was_id:
-        return "not_applied", None
-    if current_id is not None and was_id is None:
-        return "applied", [current_id]
-    return "unknown", None
+    matching = set([str(current_id)]) if current_id is not None else set()
+    return eval_support.probe_outcome_from_universe(before.get("universe"), current_universe, matching)
 
 
 # ===========================================================================
-# create_room_separation -- CREATING (probe always unknown -- see docstring)
+# create_room_separation -- CREATING
 # ===========================================================================
+
+def _room_sep_read_curve(elem):
+    """(start_mm, end_mm) or None. Room-separation lines returned by
+    NewRoomBoundaryLines are ModelCurve-derived; which access path this
+    Revit version actually supports for their geometry was an open
+    question at plan time (Phase B slice 3) -- measured live, not
+    guessed: tries .Location.Curve first (the same access walls already
+    use, ops.py's own _wall_curve_capture), falls back to .GeometryCurve.
+    Either access failing, or the curve not being a straight DB.Line,
+    excludes the element from MATCHING -- it is still counted in the
+    universe (see _room_sep_universe), so it can still suppress a false
+    'applied' by disappearing or changing, but is never approximated into
+    a match."""
+    curve = None
+    try:
+        loc = elem.Location
+        if loc is not None and hasattr(loc, "Curve"):
+            curve = loc.Curve
+    except Exception:
+        curve = None
+    if curve is None:
+        try:
+            curve = elem.GeometryCurve
+        except Exception:
+            curve = None
+    if curve is None or not isinstance(curve, DB.Line):
+        return None
+    return _xyz_to_mm(curve.GetEndPoint(0)), _xyz_to_mm(curve.GetEndPoint(1))
+
+
+def _room_sep_universe(doc):
+    """{str(id): [start_xyz_mm..., end_xyz_mm...]} for every
+    OST_RoomSeparationLines element -- Phase B slice 3's universe-diff
+    safety net. No type filter: this op sets no type on what it creates."""
+    out = {}
+    lines = DB.FilteredElementCollector(doc).OfCategory(DB.BuiltInCategory.OST_RoomSeparationLines) \
+        .WhereElementIsNotElementType().ToElements()
+    for elem in lines:
+        eid = str(get_element_id_value(elem.Id))
+        pts = _room_sep_read_curve(elem)
+        if pts is None:
+            out[eid] = None
+            continue
+        s, e = pts
+        out[eid] = [round(s["x"], 1), round(s["y"], 1), round(s["z"], 1),
+                    round(e["x"], 1), round(e["y"], 1), round(e["z"], 1)]
+    return out
+
+
+def _room_sep_matching_ids(doc, added_ids, args):
+    """Subset of added_ids (new-since-capture id strings) whose curve
+    endpoints match this action's requested curve_mm, bidirectionally,
+    within _CURVE_TOLERANCE_MM. Deliberately NOT filtered by level/view:
+    the created line's elevation already IS curve_mm's own z coordinate,
+    so a level filter would add no discriminating power beyond what the
+    endpoint match already provides (audited, not overlooked -- see
+    docs/architecture.md's Phase B slice 3 section)."""
+    curve_mm = args.get("curve_mm") or {}
+    want_start, want_end = curve_mm.get("start") or {}, curve_mm.get("end") or {}
+    out = set()
+    for eid in added_ids:
+        try:
+            elem = doc.GetElement(make_element_id(eid))
+        except Exception:
+            continue
+        if elem is None:
+            continue
+        pts = _room_sep_read_curve(elem)
+        if pts is None:
+            continue
+        s, e = pts
+        if eval_support.endpoints_match(s, e, want_start, want_end, _CURVE_TOLERANCE_MM):
+            out.add(eid)
+    return out
+
 
 def _resolve_view_for_level(doc, level_id):
     """First ViewPlan whose GenLevel matches level_id; falls back to any
@@ -457,7 +562,7 @@ def _resolve_view_for_level(doc, level_id):
 
 
 def _room_sep_capture(doc, args, targets):
-    return {}
+    return {"universe": _room_sep_universe(doc)}
 
 
 def _room_sep_run(doc, args, targets, before):
@@ -492,14 +597,22 @@ def _room_sep_inverse(args, targets, before, result):
 
 
 def _room_sep_probe(doc, args, before):
-    """(outcome, recovered_ids) -- room separation lines have no natural
-    point-membership test the way Rooms do (GetRoomAtPoint). A conclusive
-    probe would need a near-duplicate-curve scan, not implemented in Phase
-    A -- always ("unknown", None), so a crash in this op's transaction
-    window always blocks rather than guesses whether a duplicate line
-    would result, and a later created_by reference to this action's output
-    after such a resume is honestly invalid_reference, not a guess."""
-    return "unknown", None
+    """(outcome, recovered_ids, reason) -- Phase B slice 3: room
+    separation lines have no Revit built-in point/curve lookup the way
+    Rooms have GetRoomAtPoint, so identity here rests entirely on the
+    universe-diff (eval_support.probe_outcome_from_universe): every
+    OST_RoomSeparationLines element is captured at propose-adjacent time;
+    'applied' is reported only when exactly one NEW line appears whose
+    endpoints match this action's own curve_mm -- never from a bare
+    curve-scan match alone, which could not tell a new line from a
+    pre-existing one edited into coinciding endpoints."""
+    if before is None or "universe" not in before:
+        return "unknown", None, "no_capture"
+    current_universe = _room_sep_universe(doc)
+    before_universe = before.get("universe") or {}
+    added = set(current_universe.keys()) - set(before_universe.keys())
+    matching = _room_sep_matching_ids(doc, added, args) if added else set()
+    return eval_support.probe_outcome_from_universe(before_universe, current_universe, matching)
 
 
 # ===========================================================================
@@ -508,8 +621,112 @@ def _room_sep_probe(doc, args, before):
 # friendly batch route)
 # ===========================================================================
 
+def _resolve_wall_level_id(doc, args):
+    """The SAME level-resolution _line_elem_run uses below, as a plain
+    int id instead of an ElementId -- capture/probe MUST agree with run()
+    on which level a wall means, or a legitimate default (no explicit
+    level_id given) would look like a level MISMATCH between the captured
+    universe and a freshly created wall. Returns None only if the model
+    has no level at all."""
+    level_id = args.get("level_id")
+    if level_id is not None:
+        return int(level_id)
+    lvl = _first_level(doc)
+    return get_element_id_value(lvl.Id) if lvl else None
+
+
+_HEIGHT_TOLERANCE_MM = 1.0
+
+
+def _wall_read_identity(w):
+    """(start_mm, end_mm, level_id, height_mm) or None if unreadable, or
+    not hosted on a straight DB.Line -- the one place a wall's
+    identity-relevant attributes are read, shared by both the universe
+    fingerprint (_wall_universe) and the match-against-request check
+    (_wall_matching_ids) so the two can never disagree about what a given
+    wall's own attributes are."""
+    try:
+        loc = w.Location
+        if loc is None or not hasattr(loc, "Curve") or not isinstance(loc.Curve, DB.Line):
+            return None
+        curve = loc.Curve
+        start_mm, end_mm = _xyz_to_mm(curve.GetEndPoint(0)), _xyz_to_mm(curve.GetEndPoint(1))
+        base_param = w.get_Parameter(DB.BuiltInParameter.WALL_BASE_CONSTRAINT)
+        level_id = get_element_id_value(base_param.AsElementId()) if base_param else None
+        height_param = w.get_Parameter(DB.BuiltInParameter.WALL_USER_HEIGHT_PARAM)
+        height_mm = (height_param.AsDouble() * FEET_TO_MM) if height_param else None
+        return start_mm, end_mm, level_id, height_mm
+    except Exception:
+        return None
+
+
+def _wall_universe(doc, type_id):
+    """{str(id): [start_xyz_mm..., end_xyz_mm..., level_id, height_mm]}
+    for every Wall whose GetTypeId() == type_id -- Phase B slice 3's
+    universe-diff safety net, scoped by type (narrowest collector
+    available; never a global scan). A wall this reads as unreadable /
+    non-straight is still counted (fingerprint None), so it can still
+    suppress a false 'applied' by disappearing or changing, but is never
+    matched against a request (see _wall_matching_ids)."""
+    out = {}
+    walls = DB.FilteredElementCollector(doc).OfCategory(DB.BuiltInCategory.OST_Walls) \
+        .WhereElementIsNotElementType().ToElements()
+    for w in walls:
+        try:
+            if get_element_id_value(w.GetTypeId()) != type_id:
+                continue
+        except Exception:
+            continue
+        wid = str(get_element_id_value(w.Id))
+        identity = _wall_read_identity(w)
+        if identity is None:
+            out[wid] = None
+            continue
+        start_mm, end_mm, level_id, height_mm = identity
+        out[wid] = [round(start_mm["x"], 1), round(start_mm["y"], 1), round(start_mm["z"], 1),
+                    round(end_mm["x"], 1), round(end_mm["y"], 1), round(end_mm["z"], 1),
+                    level_id, (round(height_mm, 1) if height_mm is not None else None)]
+    return out
+
+
+def _wall_matching_ids(doc, added_ids, args):
+    """Subset of added_ids (new-since-capture id strings, already known
+    to be the same wall type as the request, since _wall_universe is
+    type-scoped) whose curve/level/height match every operation-controlled
+    input of this action -- type_id (implicit), curve endpoints
+    (bidirectional, _CURVE_TOLERANCE_MM), resolved level_id, height_mm
+    (_HEIGHT_TOLERANCE_MM). offset/is_structural are excluded: _line_elem_run
+    hardcodes both (0.0, False) for every call, so they carry zero
+    discriminating power."""
+    curve_mm = args.get("curve_mm") or {}
+    want_start, want_end = curve_mm.get("start") or {}, curve_mm.get("end") or {}
+    want_level = _resolve_wall_level_id(doc, args)
+    want_height_mm = float(args.get("height_mm", 3000))
+    out = set()
+    for wid in added_ids:
+        try:
+            w = doc.GetElement(make_element_id(wid))
+        except Exception:
+            continue
+        if w is None:
+            continue
+        identity = _wall_read_identity(w)
+        if identity is None:
+            continue
+        start_mm, end_mm, level_id, height_mm = identity
+        if not eval_support.endpoints_match(start_mm, end_mm, want_start, want_end, _CURVE_TOLERANCE_MM):
+            continue
+        if want_level is not None and level_id != want_level:
+            continue
+        if height_mm is None or abs(height_mm - want_height_mm) > _HEIGHT_TOLERANCE_MM:
+            continue
+        out.add(wid)
+    return out
+
+
 def _line_elem_capture(doc, args, targets):
-    return {}
+    type_id = int(args["type_id"])
+    return {"type_id": type_id, "universe": _wall_universe(doc, type_id)}
 
 
 def _line_elem_run(doc, args, targets, before):
@@ -542,18 +759,126 @@ def _line_elem_inverse(args, targets, before, result):
 
 
 def _line_elem_probe(doc, args, before):
-    """(outcome, recovered_ids) -- no natural membership test for 'a wall
-    already exists on this curve' without a geometry scan -- not
-    implemented in Phase A. Always ("unknown", None)."""
-    return "unknown", None
+    """(outcome, recovered_ids, reason) -- Phase B slice 3: identity rests
+    on the type-scoped universe-diff (eval_support.probe_outcome_from_universe).
+    'applied' only when exactly one NEW wall of this type appears whose
+    curve/level/height match this action's own request -- an existing
+    wall of the same type independently edited into a matching curve is
+    already in the captured universe and can never be reported as new."""
+    if before is None or "universe" not in before:
+        return "unknown", None, "no_capture"
+    type_id = before.get("type_id")
+    if type_id is None:
+        return "unknown", None, "no_capture"
+    current_universe = _wall_universe(doc, type_id)
+    before_universe = before.get("universe") or {}
+    added = set(current_universe.keys()) - set(before_universe.keys())
+    matching = _wall_matching_ids(doc, added, args) if added else set()
+    return eval_support.probe_outcome_from_universe(before_universe, current_universe, matching)
 
 
 # ===========================================================================
 # place_family -- CREATING
 # ===========================================================================
 
+def _place_read_identity(inst):
+    """(point_mm, host_id_or_None, level_id_or_None) or None if the
+    instance has no LocationPoint -- shared by the universe fingerprint
+    and the match-against-request check so the two can never disagree."""
+    try:
+        loc = inst.Location
+        pt = loc.Point if loc is not None and hasattr(loc, "Point") else None
+        if pt is None:
+            return None
+        point_mm = _xyz_to_mm(pt)
+    except Exception:
+        return None
+    host_id = None
+    try:
+        host = inst.Host
+        if host is not None:
+            host_id = get_element_id_value(host.Id)
+    except Exception:
+        host_id = None
+    level_id = None
+    try:
+        level_eid = inst.LevelId
+        if level_eid is not None and level_eid != DB.ElementId.InvalidElementId:
+            level_id = get_element_id_value(level_eid)
+    except Exception:
+        level_id = None
+    return point_mm, host_id, level_id
+
+
+def _place_universe(doc, symbol_id):
+    """{str(id): [x_mm, y_mm, z_mm, host_id, level_id]} for every
+    FamilyInstance whose Symbol.Id == symbol_id -- Phase B slice 3's
+    universe-diff safety net, scoped by symbol (narrowest collector
+    available for family instances; there is no OST_* category common to
+    every placeable family, and Symbol.Id is exactly what this action
+    itself controls)."""
+    out = {}
+    instances = DB.FilteredElementCollector(doc).OfClass(DB.FamilyInstance).ToElements()
+    for inst in instances:
+        try:
+            sym = inst.Symbol
+            if sym is None or get_element_id_value(sym.Id) != symbol_id:
+                continue
+        except Exception:
+            continue
+        iid = str(get_element_id_value(inst.Id))
+        identity = _place_read_identity(inst)
+        if identity is None:
+            out[iid] = None
+            continue
+        point_mm, host_id, level_id = identity
+        out[iid] = [round(point_mm["x"], 1), round(point_mm["y"], 1), round(point_mm["z"], 1),
+                    host_id, level_id]
+    return out
+
+
+def _place_matching_ids(doc, added_ids, args):
+    """Subset of added_ids (new-since-capture id strings, already known
+    to be this symbol, since _place_universe is symbol-scoped) whose
+    position/host/level match every operation-controlled input of this
+    action -- symbol_id (implicit), point (placement.PLACEMENT_TOLERANCE_FT,
+    the SAME tolerance placement.verify_place_family already uses for the
+    identical question "is this instance at the requested point", z-only
+    when hosted since a hosted instance legitimately projects X/Y onto its
+    host), host_id when the action supplied one, level_id when supplied
+    AND readable. Rotation/facing/placement type are excluded: _place_run
+    never sets them -- Revit picks a default -- so they are not
+    operation-controlled inputs to match against."""
+    want_point = args.get("point_mm") or {}
+    want_host = args.get("host_id")
+    want_level = args.get("level_id")
+    tol_mm = placement.PLACEMENT_TOLERANCE_FT * FEET_TO_MM
+    axes = "z" if want_host is not None else "xyz"
+    out = set()
+    for iid in added_ids:
+        try:
+            inst = doc.GetElement(make_element_id(iid))
+        except Exception:
+            continue
+        if inst is None:
+            continue
+        identity = _place_read_identity(inst)
+        if identity is None:
+            continue
+        point_mm, host_id, level_id = identity
+        if not eval_support.point_match(point_mm, want_point, tol_mm, axes):
+            continue
+        if want_host is not None and host_id != int(want_host):
+            continue
+        if want_level is not None and level_id is not None and level_id != int(want_level):
+            continue
+        out.add(iid)
+    return out
+
+
 def _place_capture(doc, args, targets):
-    return {}
+    symbol_id = int(args["symbol_id"])
+    return {"symbol_id": symbol_id, "universe": _place_universe(doc, symbol_id)}
 
 
 def _place_run(doc, args, targets, before):
@@ -581,10 +906,23 @@ def _place_inverse(args, targets, before, result):
 
 
 def _place_probe(doc, args, before):
-    """(outcome, recovered_ids) -- no natural membership test for 'this
-    family is already placed here' without a spatial scan -- not
-    implemented in Phase A. Always ("unknown", None)."""
-    return "unknown", None
+    """(outcome, recovered_ids, reason) -- Phase B slice 3: identity rests
+    on the symbol-scoped universe-diff (eval_support.probe_outcome_from_universe).
+    'applied' only when exactly one NEW instance of this symbol appears
+    whose position/host/level match this action's own request -- an
+    existing instance of the same symbol independently moved into a
+    matching position is already in the captured universe and can never
+    be reported as new."""
+    if before is None or "universe" not in before:
+        return "unknown", None, "no_capture"
+    symbol_id = before.get("symbol_id")
+    if symbol_id is None:
+        return "unknown", None, "no_capture"
+    current_universe = _place_universe(doc, symbol_id)
+    before_universe = before.get("universe") or {}
+    added = set(current_universe.keys()) - set(before_universe.keys())
+    matching = _place_matching_ids(doc, added, args) if added else set()
+    return eval_support.probe_outcome_from_universe(before_universe, current_universe, matching)
 
 
 # ===========================================================================

@@ -440,21 +440,32 @@ accumulating. `set_parameters`/`set_wall_curve`/`delete_elements` are
 naturally absolute (setting the same value or deleting an already-deleted id
 is a no-op the second time). The four `creating` ops make a duplicate on
 reapplication, so a crash inside their transaction window (`action_begin`
-logged, no matching `action_end`) is resolved by
-`probe(doc, args, before) -> (outcome, recovered_ids)` —
-`"applied"` skips, `"not_applied"` re-runs, `"unknown"` (including every
-creating op that has no conclusive membership test — `create_room_separation`,
-`create_line_based_element`, `place_family` all return `("unknown", None)`
-unconditionally today) blocks the task for human review rather than guessing.
-`create_room`'s probe uses `doc.GetRoomAtPoint` — the only one of the four
-with a real membership test in this pass — and, since Phase B slice 2,
-returns the real recovered room id on `"applied"` (`("applied", [room_id])`)
-instead of discarding it: `success_criteria`'s `created_by` target kind can
-then resolve a `create_room` action's output correctly even after a
-crash-resume skip, not just a normal run. The other three probes stay
-`("unknown", None)` unconditionally — a `created_by` reference to one of
-their probe-skipped actions still resolves to `invalid_reference`, honestly,
-same as before.
+logged, no matching `action_end`) is resolved by an evidence hierarchy
+(Phase B slice 3 — see that section below for the full design and the live
+findings that shaped it), checked in this order:
+
+1. **Authoritative**: a `commit_result` ledger record for this action — written
+   by the slice loop the instant `commit_verified()` reports the transaction
+   `Committed`, scoped to `idempotency: "creating"` ops only. Present and
+   non-conflicting → skip with those exact ids, no probe call at all.
+2. **Conflicting** `commit_result` records for the same action, or one whose
+   `op` disagrees with the action's own → fail closed: block for review,
+   never silently pick one.
+3. **No `commit_result` at all** → fall back to
+   `probe(doc, args, before) -> (outcome, recovered_ids, reason)` — a bounded
+   heuristic, never proof of causation. `"applied"` skips, `"not_applied"`
+   re-runs, `"unknown"` (with a machine-readable `reason`) blocks the task for
+   human review rather than guessing.
+
+All four creating ops now have a real probe, each backed by
+`eval_support.probe_outcome_from_universe` — a universe-diff, not a
+candidate-diff: every element of the relevant category+type is captured,
+matching or not, so an existing element **independently modified** into
+matching a request can never be mistaken for one this action created (a real
+bug, found and fixed in `create_room`'s own probe — see below). `"applied"`
+is returned only when the universe shows exactly one new, matching element;
+anything else — a captured element vanishing or changing, more than one new
+match, a new element that doesn't match — is `"unknown"`, never guessed.
 
 ### Unexpected-change detection (`tools/plan_tools.py::_check_unexpected_changes`)
 
@@ -574,10 +585,10 @@ forward-compatible) but is unexercised beyond `0` by any op that exists
 today.
 
 **A `created_by` reference to a probe-skipped action** (see the probe
-contract change above) resolves cleanly for `create_room` (its probe
-recovers the real id) and honestly to `invalid_reference` for the other
-three creating ops (no membership test exists for them yet) — never a
-guess either way. The result-status vocabulary did **not** grow for this:
+contract change above) resolves for all four creating ops as of Phase B
+slice 3 — never a guess either way; an action whose commit could not be
+identified with sufficient evidence still resolves to `invalid_reference`,
+honestly. The result-status vocabulary did **not** grow for this:
 `design_ok`'s aggregation already treats every non-`"passed"`/non-`"failed"`
 status identically, so a finer-grained status would change no aggregation
 behaviour, only prose — `invalid_reference`'s `reason` string carries the
@@ -595,8 +606,94 @@ checkpoint diff net-zero.
 
 Still out of scope, disclosed not solved: an action's own `targets`
 referencing a prior action's output (needs mid-slice resolution, a
-separate, larger feature); real membership probes for the other three
-creating ops (Phase A's own disclosed gap, unrelated to this slice's job).
+separate, larger feature).
+
+### Crash-resume identity for all four creating ops (Phase B, slice 3)
+
+Closes slice 2's own disclosed gap through the evidence hierarchy described
+above. Two full adversarial-review cycles preceded implementation; the
+shipped design is the third revision, after the first (type+geometry
+candidate matching) was rejected for inferring causal identity from a
+resemblance test, and the second (universe-diff without ledger fail-closing)
+was rejected for treating `not_applied` as a default and "last one wins" on
+disagreeing identity evidence.
+
+**`commit_result` — Level 1, authoritative when present.** Written by
+`plan_exec.py`'s slice loop right after `commit_verified()` reports a
+creating op's transaction `Committed`: `{"kind": "commit_result", "i", "op",
+"created_ids", "touched_ids"}`. Not atomically coupled to Revit's own
+commit — a crash between `commit_verified()` returning and this ledger
+append is the residual window the probe (Level 3) still covers — but it
+collapses that window from "anywhere between `run()` and the final
+`action_end`" down to a few Python bytecodes, since real Revit crashes
+overwhelmingly happen *during* heavy operations, not in a two-line gap.
+`task_store.commit_result_evidence(records, i)` never resolves a
+disagreement by recency: one record (or several identical ones) is
+authoritative; several disagreeing records — different `op`/`created_ids`/
+`touched_ids` — is `("conflict", None, "commit_result_conflict")`, and
+`_classify_open_action` blocks rather than guessing which is right.
+`task_store.ledger_conflicts(records)` separately cross-checks every
+`commit_result` against that same action's eventual `action_end` and
+surfaces disagreement through a new `ledger_conflicts` field on
+`fold_progress`'s output, next to `unknown_ledger_kinds`. Live-confirmed:
+a real `_run_slice` call produced the ledger sequence `action_begin →
+stage(committing) → commit_result → stage(verifying) → action_end`
+with `commit_result.created_ids` and the eventual `action_end.created_ids`
+agreeing exactly; a synthetic crash-window ledger (commit_result present,
+no action_end yet) resolved via Level 1 with the op's own probe
+monkey-patched to raise and confirmed never called; two disagreeing
+`commit_result` records for the same action correctly blocked.
+
+**On the authoritative path, the skip also runs the op's real `verify()`**
+against a synthetic `{"created_ids", "touched_ids"}` result, instead of the
+permanent `not_checked` a heuristic recovery still gets — live-confirmed
+returning a genuine `room_area` verification (`{"ok": true, "actual":
+{"area_sqm": 3.42, ...}}`), not a placeholder.
+
+**Level 3 — universe-diff, not candidate-diff, for all four ops.**
+`eval_support.probe_outcome_from_universe(before_map, current_map,
+matching_ids)` requires the *entire* captured universe's survivors to be
+byte-identical before "no new ids" is even considered — an id present at
+capture time that vanishes, or whose fingerprint changes, forces `unknown`
+regardless of what else appears. `"applied"` is returned only for exactly
+one new id that is also in `matching_ids`. Per-op universe/identity:
+
+| Op | Universe | Identity checked | Excluded (why) |
+|---|---|---|---|
+| `create_line_based_element` | `OST_Walls`, `GetTypeId() == type_id` | curve endpoints (bidirectional), base level (via `WALL_BASE_CONSTRAINT`, resolved by the same helper `_line_elem_run` itself uses), height (`WALL_USER_HEIGHT_PARAM`) | offset/`is_structural` — hardcoded constants in `_line_elem_run` |
+| `create_room_separation` | `OST_RoomSeparationLines` | curve endpoints only | level/view — the line's own z already carries this information |
+| `place_family` | `FamilyInstance`, `Symbol.Id == symbol_id` | point (host-aware tolerance, reusing `placement.PLACEMENT_TOLERANCE_FT` and `verify_place_family`'s own z-only-when-hosted rule), host id and level id when supplied and readable | rotation/facing/placement type — not set by `_place_run` |
+| `create_room` | `OST_Rooms` | `GetRoomAtPoint` intersected with newly-appeared ids | — |
+
+**The `_room_probe` fix.** The original compared only `GetRoomAtPoint`
+before vs. after, which cannot distinguish a newly created room from a
+**pre-existing** room whose boundary grew to newly cover the test point —
+live-reproduced by building a small room, capturing a point outside it,
+then extending the enclosing walls (keeping the loop closed) until
+`GetRoomAtPoint` for that point started returning the same pre-existing
+room: the fixed probe answered `unknown` / `relevant_model_change_ambiguous`
+while the old comparison would have answered `applied` with a wrong id.
+
+**Room-separation curve access, measured**: `.Location.Curve` on a real
+`NewRoomBoundaryLines`-created `ModelLine` returns a usable `DB.Line`
+directly; `.GeometryCurve` ships as a defensive fallback but is unexercised
+in this Revit version.
+
+**Live-verified for all four ops**: `not_applied`, `applied` with the exact
+real id, ambiguous (two new matching → `unknown`, no id), a pre-existing
+duplicate correctly excluded when a genuinely new match appears alongside
+it, and probe determinism. Collector cost measured against the real model
+(61 walls, 327 family instances, ~700 elements total): single-digit-to-low-
+teens milliseconds per universe scan. Every element created during
+verification deleted afterward; tracker checkpoint diff net-zero.
+
+**Residual risk, documented not designed away**: `resume=true` bypasses the
+`revit_restarted` block specifically so recovery can run after a real Revit
+restart — exactly the window in which a human might have edited the model.
+An indistinguishable element created by someone else, with no other change
+in that same universe, would satisfy the heuristic; this is a bounded
+heuristic, never described as proof of causation. Document locking stays
+out of scope.
 
 ---
 

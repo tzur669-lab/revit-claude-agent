@@ -142,3 +142,185 @@ def test_aggregate_unknown_among_passes_is_none_never_promoted_to_true():
 @pytest.mark.parametrize("status", sorted(es.STATUSES - {"passed", "failed"}))
 def test_aggregate_every_non_terminal_status_alone_is_none(status):
     assert es.aggregate_design_ok([_r(status)]) is None
+
+
+# ---------------------------------------------------------------------------
+# probe_outcome_from_universe -- Phase B slice 3's crash-resume identity
+# rule. Never guesses: a false "applied" and a false "not_applied" are
+# both unacceptable; only a conservative "unknown" is safe when the
+# universe shows anything other than exactly one clean appearance.
+# ---------------------------------------------------------------------------
+
+def test_probe_no_capture_is_unknown():
+    assert es.probe_outcome_from_universe(None, {"1": [0]}, set()) == ("unknown", None, "no_capture")
+
+
+def test_probe_equal_universes_is_not_applied():
+    before = {"1": [10, 20]}
+    current = {"1": [10, 20]}
+    assert es.probe_outcome_from_universe(before, current, set()) == ("not_applied", None, "no_relevant_change")
+
+
+def test_probe_both_empty_is_not_applied():
+    assert es.probe_outcome_from_universe({}, {}, set()) == ("not_applied", None, "no_relevant_change")
+
+
+def test_probe_one_new_matching_is_applied_with_exact_id():
+    before = {"1": [10, 20]}
+    current = {"1": [10, 20], "2": [30, 40]}
+    outcome, recovered, reason = es.probe_outcome_from_universe(before, current, {"2"})
+    assert (outcome, recovered, reason) == ("applied", ["2"], "single_new_match")
+
+
+def test_probe_one_new_not_matching_is_unknown():
+    before = {"1": [10, 20]}
+    current = {"1": [10, 20], "2": [30, 40]}
+    assert es.probe_outcome_from_universe(before, current, set()) == (
+        "unknown", None, "new_elements_none_matching")
+
+
+def test_probe_two_new_matching_is_unknown_multiple_candidates():
+    before = {}
+    current = {"1": [10], "2": [20]}
+    assert es.probe_outcome_from_universe(before, current, {"1", "2"}) == (
+        "unknown", None, "multiple_new_candidates")
+
+
+def test_probe_two_new_one_matching_is_still_multiple_candidates():
+    """len(added) > 1 is checked before matching_ids -- a second,
+    unrelated new element must not be waved through just because only one
+    of the two new ids happens to match the request."""
+    before = {}
+    current = {"1": [10], "2": [20]}
+    assert es.probe_outcome_from_universe(before, current, {"1"}) == (
+        "unknown", None, "multiple_new_candidates")
+
+
+def test_probe_pre_existing_element_deleted_is_unknown_even_with_one_new_match():
+    """B1 regression guard: a captured element vanishing must force
+    unknown even though a genuinely new, matching element also appeared --
+    'exactly one thing changed' is violated by the disappearance alone."""
+    before = {"1": [10, 20]}
+    current = {"2": [30, 40]}
+    assert es.probe_outcome_from_universe(before, current, {"2"}) == (
+        "unknown", None, "relevant_model_change_ambiguous")
+
+
+def test_probe_pre_existing_element_modified_is_unknown():
+    """B1 regression guard: a surviving element whose fingerprint changed
+    (it was independently modified, not newly created) must never be
+    reported as 'no relevant change' -- it must force unknown even when
+    NO new id appeared at all."""
+    before = {"1": [10, 20]}
+    current = {"1": [99, 99]}
+    assert es.probe_outcome_from_universe(before, current, set()) == (
+        "unknown", None, "relevant_model_change_ambiguous")
+
+
+def test_probe_pre_existing_element_modified_into_a_match_is_not_reported_applied():
+    """The precise B1 scenario: an existing element (not in 'matching_ids'
+    at capture time, since it didn't match then) is modified so its id
+    would now satisfy the request. It is still a SURVIVOR (present both
+    before and after under the same id), never treated as new, so it can
+    never be handed back as a recovered id."""
+    before = {"1": [10, 20]}
+    current = {"1": [99, 99]}
+    assert es.probe_outcome_from_universe(before, current, {"1"}) == (
+        "unknown", None, "relevant_model_change_ambiguous")
+
+
+def test_probe_matching_id_that_is_not_new_does_not_count():
+    """matching_ids is only ever consulted for ids that are actually new
+    (added); an id already present in 'before' being passed in
+    matching_ids by mistake must not manufacture an 'applied' out of a
+    truly unchanged universe."""
+    before = {"1": [10, 20]}
+    current = {"1": [10, 20]}
+    assert es.probe_outcome_from_universe(before, current, {"1"}) == (
+        "not_applied", None, "no_relevant_change")
+
+
+def test_probe_determinism_same_inputs_twice():
+    before = {"1": [10, 20]}
+    current = {"1": [10, 20], "2": [30, 40]}
+    r1 = es.probe_outcome_from_universe(before, current, {"2"})
+    r2 = es.probe_outcome_from_universe(before, current, {"2"})
+    assert r1 == r2
+
+
+def test_probe_reasons_frozenset_matches_every_actual_output():
+    """Drift guard: one representative call per branch, collected and
+    compared against the full published PROBE_REASONS set in BOTH
+    directions -- a renamed/added/removed reason string in the function
+    breaks this test rather than silently diverging from what's
+    documented as the complete set."""
+    seen = set()
+    seen.add(es.probe_outcome_from_universe(None, {}, set())[2])
+    seen.add(es.probe_outcome_from_universe({}, {}, set())[2])
+    seen.add(es.probe_outcome_from_universe({"1": [1]}, {"1": [1], "2": [2]}, {"2"})[2])
+    seen.add(es.probe_outcome_from_universe({"1": [1]}, {"1": [1], "2": [2]}, set())[2])
+    seen.add(es.probe_outcome_from_universe({}, {"1": [1], "2": [2]}, {"1", "2"})[2])
+    seen.add(es.probe_outcome_from_universe({"1": [1]}, {}, set())[2])
+    assert seen == es.PROBE_REASONS
+
+
+# ---------------------------------------------------------------------------
+# endpoints_match -- bidirectional curve-endpoint matching with tolerance
+# ---------------------------------------------------------------------------
+
+def _pt(x, y, z=0):
+    return {"x": x, "y": y, "z": z}
+
+
+def test_endpoints_match_exact_same_direction():
+    assert es.endpoints_match(_pt(0, 0), _pt(10, 0), _pt(0, 0), _pt(10, 0), 1.0) is True
+
+
+def test_endpoints_match_reversed_direction():
+    assert es.endpoints_match(_pt(0, 0), _pt(10, 0), _pt(10, 0), _pt(0, 0), 1.0) is True
+
+
+def test_endpoints_match_within_tolerance():
+    assert es.endpoints_match(_pt(0.5, 0), _pt(10, 0.5), _pt(0, 0), _pt(10, 0), 1.0) is True
+
+
+def test_endpoints_match_just_outside_tolerance_on_x():
+    assert es.endpoints_match(_pt(1.5, 0), _pt(10, 0), _pt(0, 0), _pt(10, 0), 1.0) is False
+
+
+def test_endpoints_match_just_outside_tolerance_on_y():
+    assert es.endpoints_match(_pt(0, 1.5), _pt(10, 0), _pt(0, 0), _pt(10, 0), 1.0) is False
+
+
+def test_endpoints_match_just_outside_tolerance_on_z():
+    assert es.endpoints_match(_pt(0, 0, 1.5), _pt(10, 0), _pt(0, 0), _pt(10, 0), 1.0) is False
+
+
+def test_endpoints_match_missing_axis_defaults_to_zero():
+    assert es.endpoints_match({"x": 0, "y": 0}, {"x": 10, "y": 0}, _pt(0, 0), _pt(10, 0), 1.0) is True
+
+
+def test_endpoints_match_totally_different_curve_is_false():
+    assert es.endpoints_match(_pt(0, 0), _pt(10, 0), _pt(500, 500), _pt(600, 600), 1.0) is False
+
+
+# ---------------------------------------------------------------------------
+# point_match -- axis-scoped tolerance (the hosted-instance z-only case)
+# ---------------------------------------------------------------------------
+
+def test_point_match_xyz_within_tolerance():
+    assert es.point_match(_pt(1, 1, 1), _pt(0, 0, 0), 2.0, "xyz") is True
+
+
+def test_point_match_xyz_just_outside_tolerance():
+    assert es.point_match(_pt(3, 0, 0), _pt(0, 0, 0), 2.0, "xyz") is False
+
+
+def test_point_match_z_only_ignores_xy_drift():
+    """The hosted-instance case: a family instance hosted on a wall
+    legitimately projects X/Y onto the host, so only Z should be checked."""
+    assert es.point_match(_pt(500, 500, 1), _pt(0, 0, 0), 2.0, "z") is True
+
+
+def test_point_match_z_only_still_rejects_z_drift():
+    assert es.point_match(_pt(0, 0, 5), _pt(0, 0, 0), 2.0, "z") is False

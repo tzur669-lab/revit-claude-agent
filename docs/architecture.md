@@ -505,6 +505,157 @@ threshold. `_room_probe`'s recovered id was directly confirmed to match the
 real created room's id. All 5 elements were deleted afterward and the
 tracker's own checkpoint diff confirmed net-zero.
 
+### Phase B, slice 3: crash-resume identity that never manufactures certainty
+
+Slice 2 left one disclosed gap open: `create_room_separation`,
+`create_line_based_element`, and `place_family` had no membership test at
+all — their probes were unconditionally `("unknown", None)`, so a crash in
+any of their transaction windows always blocked the task for manual review,
+and a `created_by` reference to one of them stayed `invalid_reference`
+forever. Closed 2026-09-07 through **two** full adversarial-review cycles —
+the first draft (type+geometry candidate matching) was rejected for
+inferring causal identity from a resemblance test; the second draft
+(universe-diff) was rejected again for treating `not_applied` as a default
+rather than a conclusion, and for "last one wins" tie-breaking on identity
+evidence. The design that shipped is the third revision.
+
+**A 4-level evidence hierarchy, made real, not just documented:**
+
+1. **Authoritative** — a single, non-conflicting `commit_result` ledger
+   record.
+2. **Any other deterministic signal** — audited, found not to exist:
+   every ledger record an open action can leave (`action_begin`, bare
+   `stage` markers) carries no `result`; `created_ids` is written exactly
+   once, in `action_end`, which by definition doesn't exist for an open
+   action.
+3. **Universe-diff heuristic**, bounded — described below.
+4. **`unknown` with a reason** — never a guessed id.
+
+**Level 1 — `commit_result`, a new ledger record.** `plan_exec.py`'s slice
+loop, immediately after `commit_verified()` reports a **creating** op's
+transaction `Committed` (absolute ops need no identity recovery and get no
+record), appends `{"kind": "commit_result", "i", "op", "created_ids",
+"touched_ids"}` — authoritative because it is written only once Revit
+itself confirms the commit, using the real `result` already in memory at
+that point. This is **not** an atomic pairing with Revit's own commit: a
+crash between `commit_verified()` returning and this append is exactly the
+residual window Level 3 still exists for. `_classify_open_action` checks
+this record **before** any probe call; when present, the op's own probe is
+never invoked at all (live-confirmed by monkey-patching a probe to raise
+and observing it never fires). On the authoritative path only, the skip
+also runs the op's real `verify()` against a synthetic
+`{"created_ids", "touched_ids"}` result, instead of recording a permanent
+`not_checked` — identity is certain there, so re-checking the element's own
+post-conditions adds real information; a heuristic recovery keeps the
+plain `not_checked` it always had, since re-verifying the least-certain
+part of the picture would only manufacture the appearance of confidence.
+
+**Ledger integrity is fail-closed, never "last one wins."**
+`task_store.commit_result_evidence(records, i)`: no record → fall through
+to the probe; one record (or several identical ones) → authoritative;
+several **disagreeing** records (different `op`/`created_ids`/`touched_ids`)
+→ `("conflict", None, "commit_result_conflict")`, and `_classify_open_action`
+**blocks** rather than picking one arbitrarily — a duplicated or corrupted
+ledger must never silently change which element a recovery believes was
+created. Separately, `task_store.ledger_conflicts(records)` cross-checks
+every `commit_result` against that same action's eventual `action_end` and
+surfaces a disagreement (agreement, the overwhelmingly common case, is not
+reported) through a new `ledger_conflicts` field on `fold_progress`'s
+existing anomaly channel, next to `unknown_ledger_kinds` — visible, never
+silently repaired, flowing to `get_task_status` through the response
+builder with no tool-schema change.
+
+**Level 3 — universe-diff, not candidate-diff.** The first-rejected design
+diffed only elements *matching the request*; that cannot tell a newly
+**created** element from a pre-existing one **independently modified** into
+matching, since an element that didn't match at capture time was never in
+the "before" picture at all — live-reproduced and fixed (below). The
+shipped design captures the **whole type-scoped universe** — every element
+of the relevant category+type, matching or not, as `{str(id):
+quantized_fingerprint}` — and requires the *entire* survivor set to be
+byte-identical before even considering "no new ids" a conclusion:
+
+```
+before_map is None                                    -> unknown, "no_capture"
+any id in before_map missing from current, or changed  -> unknown, "relevant_model_change_ambiguous"
+(only once the universe is otherwise UNCHANGED do we look at what's new)
+no new ids                                            -> not_applied, "no_relevant_change"
+exactly one new id, in matching_ids                    -> applied, [that id], "single_new_match"
+exactly one new id, not matching                       -> unknown, "new_elements_none_matching"
+more than one new id                                  -> unknown, "multiple_new_candidates"
+```
+
+`applied` and a recovered id are established by the same single fact and
+are never returned apart. This lives in `eval_support.py`
+(`probe_outcome_from_universe`, plus `endpoints_match`/`point_match`) —
+Revit-free and exhaustively unit-tested, respecting this repo's own rule
+that `FilteredElementCollector` is never faked offline
+(`conftest_revit_mcp.py`): the pure comparison is tested for real; the
+Revit-side collection is tested live.
+
+**Per-op identity uses only operation-controlled inputs, not "whatever
+Revit exposes":**
+
+| Op | Universe (narrowest collector) | Matched on | Deliberately excluded |
+|---|---|---|---|
+| `create_line_based_element` | `OST_Walls`, `GetTypeId() == type_id` | curve endpoints (bidirectional, `_CURVE_TOLERANCE_MM`), base-level (resolved by the **same** helper `_line_elem_run` uses), height (`WALL_USER_HEIGHT_PARAM`) | offset/`is_structural` — `_line_elem_run` hardcodes both, zero discrimination |
+| `create_room_separation` | `OST_RoomSeparationLines` | curve endpoints only | level/view — the line's elevation **is** `curve_mm`'s own z; adds no discrimination beyond the endpoint match, audited not overlooked |
+| `place_family` | `FamilyInstance`, `Symbol.Id == symbol_id` | point (`placement.PLACEMENT_TOLERANCE_FT`, z-only when hosted — the same rule `verify_place_family` already uses), host id when supplied, level id when supplied **and** reliably readable | rotation/facing/placement type — `_place_run` never sets them, Revit picks a default |
+| `create_room` | `OST_Rooms` | `GetRoomAtPoint` ∩ newly-appeared ids | — (this is the fix below) |
+
+**The `_room_probe` false-`applied` bug, found by applying the review's own
+scenario list to already-shipped code, not by testing it:** the original
+probe compared only `GetRoomAtPoint`'s result before vs. after. It cannot
+tell "a new room was created here" from "a **pre-existing** room started
+reaching this point because its boundary grew elsewhere during the crash
+window" — the second case reported `("applied", [that pre-existing room's
+id])`, handing a wrong id to any `created_by` reference. **Live-reproduced
+exactly**: built a 2×2 m room, captured a point outside it, then extended
+the enclosing walls (keeping the loop closed) until `GetRoomAtPoint` for
+that outside point started returning the *same* pre-existing room —
+confirmed the fixed probe answers `unknown` / `relevant_model_change_ambiguous`,
+while the old single-id comparison would have answered `applied`, with the
+real IDs printed side by side.
+
+**The room-separation curve-access question, measured, not guessed:**
+`.Location.Curve` on a real `NewRoomBoundaryLines`-created `ModelLine`
+returns a real `DB.Line` directly — the walls-style access works, so the
+`.GeometryCurve` fallback ships but is unexercised in this Revit version.
+
+**Live-verified, not just fresh-reimport in isolation**, for every one of
+the four creating ops: `not_applied` (nothing created), `applied` with the
+exact real id (heuristic path), ambiguous (two new matching →
+`unknown`/`multiple_new_candidates`, no id), a **pre-existing duplicate**
+already in the universe correctly excluded when a genuinely new match
+appears alongside it, and probe determinism (two calls, identical result).
+Plus the full pipeline end-to-end: a real `_run_slice` call on a genuine
+one-action plan produced the ledger sequence
+`action_begin → stage(committing) → commit_result → stage(verifying) →
+action_end`, with `commit_result.created_ids` and `action_end.created_ids`
+agreeing exactly; a synthetic crash-window ledger (a `commit_result` with
+no following `action_end`) resolved through `_classify_open_action` via
+Level 1 with the op's probe monkey-patched to raise and never firing; two
+disagreeing `commit_result` records for the same action correctly
+`block`ed rather than picking one. Collector cost measured against the
+real model (61 walls, 327 family instances, ~700 elements total): each
+universe scan completed in single-digit-to-low-teens milliseconds, negligible
+against the 20-second slice budget. Every element created during
+verification was deleted afterward; the tracker's own checkpoint diff
+confirmed net-zero.
+
+**Residual risk, documented rather than designed away:** `resume=true`
+deliberately bypasses the `revit_restarted` block, so recovery runs
+precisely when a human may have edited the model in between crash and
+resume. Someone creating an indistinguishable element, with no other
+change in that same type-scoped universe, would satisfy the heuristic —
+this is not provable causation, only a bounded heuristic, and is never
+described as more than that. Document locking against concurrent edits
+during the recovery window stays out of scope.
+
+**Still open, disclosed not solved:** action-to-action targeting (an
+action's own `targets` referencing a prior action's output, not just a
+criterion's) — a separate, larger feature, no evidence forcing it yet.
+
 ---
 
 ## Measured traps

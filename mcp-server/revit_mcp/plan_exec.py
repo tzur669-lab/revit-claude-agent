@@ -149,36 +149,80 @@ def preflight(doc, plan, approval=None):
 # resume classification -- the recovery matrix's crash-window row
 # ---------------------------------------------------------------------------
 
-def _classify_open_action(doc, open_action):
-    """(decision, note, recovered_ids) where decision in "run" | "skip" |
-    "block". "absolute"-class ops converge on re-application, so an
-    unknown outcome is always safe to just run again. "creating"-class ops
-    must probe(). recovered_ids is None except for a "skip" whose probe()
-    could conclusively resolve the actual created element (Phase B slice
-    2: create_room's probe already resolves it via GetRoomAtPoint; the
-    other three creating ops' probes are unconditional ("unknown", None) --
-    a pre-existing, disclosed Phase A limitation, not solved here) -- when
-    present, the caller can record the real id instead of an empty
-    created_ids, which is what makes a later created_by reference to this
-    action's output resolvable after a crash-resume skip."""
+def _classify_open_action(doc, open_action, ledger_records):
+    """(decision, note, recovered_ids, identity_evidence) where decision
+    in "run" | "skip" | "block". "absolute"-class ops converge on
+    re-application, so an unknown outcome is always safe to just run
+    again.
+
+    "creating"-class ops are resolved by an evidence hierarchy (Phase B
+    slice 3, docs/architecture.md): a "commit_result" ledger record --
+    written by _run_slice the instant commit_verified() reports this
+    action's transaction Committed -- is checked FIRST and, when present
+    and non-conflicting, is authoritative: it is never re-derived
+    heuristically, and never overridden by a probe. Only when no
+    commit_result exists (Case A: nothing was recorded before the crash,
+    e.g. the crash happened before or during commit itself) does the op's
+    own probe() run, as a bounded Level-3 heuristic (see
+    eval_support.probe_outcome_from_universe). identity_evidence is None
+    for "run"/"block", else "authoritative_commit" or
+    "heuristic_universe_diff" -- threaded into the skip's own action_end
+    record so a later created_by reference (and a human reading
+    get_task_status) can tell which kind of evidence a recovered id rests
+    on."""
     op_name = open_action.get("op")
+    i = open_action.get("i")
     spec = ops.OPS.get(op_name)
     if spec is None:
-        return "block", "unknown op %r for open action" % (op_name,), None
+        return "block", "unknown op %r for open action" % (op_name,), None, None
     if spec["idempotency"] == "absolute":
-        return "run", "absolute op - safe to re-apply", None
+        return "run", "absolute op - safe to re-apply", None, None
+
+    ev_kind, payload, ev_reason = task_store.commit_result_evidence(ledger_records, i)
+    if ev_kind == "conflict":
+        return "block", "commit_result conflict for action %d: %s" % (i, ev_reason), None, None
+    if ev_kind == "ok":
+        if payload.get("op") != op_name:
+            return ("block",
+                    "commit_result.op %r does not match action %d's own op %r" % (payload.get("op"), i, op_name),
+                    None, None)
+        return ("skip", "commit_result: transaction verified committed",
+                payload.get("created_ids") or [], "authoritative_commit")
+
+    # ev_kind == "absent" -- no Level-1 evidence for this action; fall
+    # back to the op's own probe (Level 3, a bounded heuristic).
     probe_fn = spec.get("probe")
     if probe_fn is None:
-        return "block", "creating op with no probe()", None
+        return "block", "creating op with no probe()", None, None
     try:
-        outcome, recovered_ids = probe_fn(doc, open_action.get("args") or {}, open_action.get("before"))
+        outcome, recovered_ids, reason = probe_fn(doc, open_action.get("args") or {}, open_action.get("before"))
     except Exception as e:
-        return "block", "probe() raised: %s" % str(e), None
+        return "block", "probe() raised: %s" % str(e), None, None
     if outcome == "not_applied":
-        return "run", "probe: not yet applied", None
+        return "run", "probe: not yet applied (%s)" % reason, None, None
     if outcome == "applied":
-        return "skip", "probe: already applied", recovered_ids
-    return "block", "probe: outcome unknown", None
+        return "skip", "probe: already applied (%s)" % reason, recovered_ids, "heuristic_universe_diff"
+    return "block", "probe: outcome unknown (%s)" % reason, None, None
+
+
+def _verify_recovered(doc, open_action, recovered_ids, identity_evidence, note):
+    """Only the authoritative path gets a real verify() call: identity is
+    certain there, so re-checking the element's own post-conditions adds
+    real information. A heuristic recovery's identity is already the
+    least-certain part of the picture -- re-verifying it would not add
+    confidence, only the appearance of it, so it keeps today's plain
+    not_checked. Never mutates, never opens a transaction (called before
+    tg.Start() in the caller); a raised verify() is swallowed into
+    not_checked, matching every other verify() call site in this file."""
+    if identity_evidence != "authoritative_commit":
+        return {"ok": None, "status": "not_checked", "reason": note}
+    spec = ops.OPS.get(open_action.get("op"))
+    synthetic_result = {"created_ids": recovered_ids or [], "touched_ids": []}
+    try:
+        return spec["verify"](doc, open_action.get("args") or {}, open_action.get("targets"),
+                               open_action.get("before"), synthetic_result)
+    except Exception as e:
+        return {"ok": None, "status": "not_checked", "reason": "verify() raised: %s" % str(e)}
 
 
 # ---------------------------------------------------------------------------
@@ -203,16 +247,17 @@ def _run_slice(doc, task_id, task_dir, plan, policy, budget_ms, cancel_check_ena
         return {"outcome": "blocked", "review_reasons": ["ledger_corrupt"],
                 "note": "more than one open action in the ledger"}
     if open_action is not None:
-        decision, note, recovered_ids = _classify_open_action(doc, open_action)
+        decision, note, recovered_ids, identity_evidence = _classify_open_action(doc, open_action, ledger_records)
         i = open_action.get("i")
         if decision == "block":
             return {"outcome": "blocked", "review_reasons": ["unknown_action_outcome"], "note": note}
         if decision == "skip":
+            verified = _verify_recovered(doc, open_action, recovered_ids, identity_evidence, note)
             task_store.append_ledger(task_dir, {
                 "kind": "action_end", "i": i, "status": "skipped",
-                "execution_ok": None, "verified": {"ok": None, "status": "not_checked", "reason": note},
+                "execution_ok": None, "verified": verified,
                 "touched_ids": [], "touched_uids": [], "created_ids": recovered_ids or [],
-                "cascaded_ids": [], "error": None,
+                "cascaded_ids": [], "error": None, "identity_evidence": identity_evidence,
             })
             done_indices.add(i)
         # decision == "run": fall through, the action below will re-run it
@@ -318,6 +363,23 @@ def _run_slice(doc, task_id, task_dir, plan, policy, budget_ms, cancel_check_ena
                     aborted_for_failure = True
                     break
                 continue
+
+            if spec["idempotency"] == "creating":
+                # Level-1 authoritative evidence (Phase B slice 3): recorded
+                # the instant Revit itself reports this transaction
+                # Committed -- NOT atomically coupled to that fact (a crash
+                # between commit_verified() returning and this append still
+                # falls back to the op's own probe, a Level-3 heuristic; see
+                # docs/architecture.md). Scoped to "creating" ops only --
+                # "absolute" ops are safe to blindly re-run and need no
+                # identity recovery. created_ids is recorded even when
+                # empty: "committed, created nothing" is itself authoritative
+                # and must not be confused with "no commit_result at all".
+                task_store.append_ledger(task_dir, {
+                    "kind": "commit_result", "i": i, "op": op_name,
+                    "created_ids": result.get("created_ids", []),
+                    "touched_ids": result.get("touched_ids", []),
+                })
 
             task_store.append_ledger(task_dir, {"kind": "stage", "i": i, "stage": "verifying"})
             try:

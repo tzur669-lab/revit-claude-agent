@@ -409,7 +409,7 @@ LEDGER_SCHEMA_V = 1
 KNOWN_LEDGER_KINDS = frozenset([
     "task_meta", "state", "outcome_amend", "slice_open", "action_begin",
     "stage", "action_end", "slice_close", "verdict", "note", "preflight",
-    "criterion",
+    "criterion", "commit_result",
 ])
 
 
@@ -537,6 +537,94 @@ def created_ids_by_action(records):
     return out
 
 
+def commit_result_evidence(records, i):
+    """(kind, payload, reason) -- Phase B slice 3's Level-1 authoritative
+    evidence for action index `i`, from "commit_result" records (written
+    by plan_exec.py's _run_slice the instant commit_verified() reports a
+    "creating" op's transaction Committed -- see docs/architecture.md).
+    Deliberately NOT "last one wins" the way created_ids_by_action's
+    action_end projection is: that rule is safe for a *display*
+    projection of records the system itself already agrees on, but
+    identity recovery must never silently prefer one of several
+    DISAGREEING records just because it comes later in the file --  a
+    duplicated or corrupted ledger must not change which element a
+    recovery believes was created.
+
+      no commit_result for i              -> ("absent", None, None)
+      exactly one, or several IDENTICAL   -> ("ok", {"op", "created_ids", "touched_ids"}, None)
+      several, differing in op/created_ids/touched_ids -> ("conflict", None, "commit_result_conflict")
+    """
+    matches = [r for r in records if r.get("kind") == "commit_result" and r.get("i") == i]
+    if not matches:
+        return "absent", None, None
+
+    def _key(r):
+        return (r.get("op"), tuple(r.get("created_ids") or []), tuple(r.get("touched_ids") or []))
+
+    keys = set(_key(r) for r in matches)
+    if len(keys) > 1:
+        return "conflict", None, "commit_result_conflict"
+    r0 = matches[0]
+    payload = {
+        "op": r0.get("op"),
+        "created_ids": list(r0.get("created_ids") or []),
+        "touched_ids": list(r0.get("touched_ids") or []),
+    }
+    return "ok", payload, None
+
+
+def ledger_conflicts(records):
+    """[{'i', 'kind', ...}, ...] -- ledger-integrity anomalies a healthy
+    run never produces, surfaced the same way fold_progress() already
+    surfaces unknown_ledger_kinds (visible, never silently dropped, never
+    silently repaired). Two checks:
+
+      'commit_result_conflict' -- more than one commit_result for the
+      same action index disagreeing with each other (see
+      commit_result_evidence's own docstring for why this is never
+      resolved by "last one wins").
+
+      'commit_result_vs_action_end' -- a commit_result's created_ids
+      disagrees with that SAME action's eventual action_end.created_ids.
+      In an ordinary run both exist and agree (Level-1 evidence is
+      written, then the slice loop still appends its normal action_end
+      moments later) -- agreement is the overwhelmingly common case and
+      is not reported; only disagreement is, since this channel exists to
+      surface what should never happen."""
+    commit_by_i = {}
+    for r in records:
+        if r.get("kind") != "commit_result":
+            continue
+        commit_by_i.setdefault(r.get("i"), []).append(r)
+
+    end_by_i = {}
+    for r in records:
+        if r.get("kind") == "action_end" and r.get("status") in ("done", "skipped"):
+            end_by_i[r.get("i")] = r  # last-one-wins is fine here: created_ids_by_action's own
+            # established rule, and at most one exists per i in a non-corrupt ledger anyway.
+
+    out = []
+    for i, crs in commit_by_i.items():
+        cr_id_sets = set(tuple(r.get("created_ids") or []) for r in crs)
+        if len(cr_id_sets) > 1:
+            out.append({
+                "i": i, "kind": "commit_result_conflict",
+                "created_ids_seen": [list(x) for x in cr_id_sets],
+            })
+            continue
+        cr_ids = list(next(iter(cr_id_sets)))
+        end = end_by_i.get(i)
+        if end is None:
+            continue
+        end_ids = list(end.get("created_ids") or [])
+        if cr_ids != end_ids:
+            out.append({
+                "i": i, "kind": "commit_result_vs_action_end",
+                "commit_result_ids": cr_ids, "action_end_ids": end_ids,
+            })
+    return out
+
+
 # ---------------------------------------------------------------------------
 # projection -- pure fold over the ledger, no I/O, no clock reads
 # ---------------------------------------------------------------------------
@@ -659,7 +747,10 @@ def fold_progress(records):
                 "actual": rec.get("actual"), "status": rec.get("status"), "ok": rec.get("ok"),
                 "reason": rec.get("reason"), "used_type_fallback": rec.get("used_type_fallback"),
             })
-        # verdict / note / preflight: intentionally not folded here.
+        # verdict / note / preflight / commit_result: intentionally not
+        # folded into an action's display fields here -- commit_result is
+        # projected separately, below, by ledger_conflicts(), since its
+        # job is integrity-checking, not display.
 
     if cur_slice is not None:
         # crash during slice close -- surface the open slice, don't hide it.
@@ -730,6 +821,7 @@ def fold_progress(records):
                      "verification_ok": verification_ok, "design_ok": design_ok},
         "unknown_ledger_kinds": sorted(unknown_kinds),
         "higher_ledger_schema_seen": sorted(higher_lv_seen),
+        "ledger_conflicts": ledger_conflicts(records),
         "updated_epoch": epoch_now(),
     }
 

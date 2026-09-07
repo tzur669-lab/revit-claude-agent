@@ -227,6 +227,166 @@ def test_created_ids_by_action_later_record_for_same_i_wins():
 
 
 # ---------------------------------------------------------------------------
+# commit_result_evidence -- Phase B slice 3's Level-1 authoritative
+# evidence. Never "last one wins": a disagreement is a conflict, not a
+# tiebreak.
+# ---------------------------------------------------------------------------
+
+def test_commit_result_evidence_absent_when_none_recorded():
+    assert ts.commit_result_evidence([], 0) == ("absent", None, None)
+    records = [{"kind": "action_end", "i": 0, "status": "done", "created_ids": [1]}]
+    assert ts.commit_result_evidence(records, 0) == ("absent", None, None)
+
+
+def test_commit_result_evidence_single_record_is_ok():
+    records = [{"kind": "commit_result", "i": 0, "op": "create_room",
+                "created_ids": [1660300], "touched_ids": []}]
+    kind, payload, reason = ts.commit_result_evidence(records, 0)
+    assert kind == "ok"
+    assert reason is None
+    assert payload == {"op": "create_room", "created_ids": [1660300], "touched_ids": []}
+
+
+def test_commit_result_evidence_empty_created_ids_is_ok_not_absent():
+    """A committed creating action that produced nothing is authoritative
+    evidence too -- must not be conflated with 'no Level-1 evidence
+    exists at all' (B5)."""
+    records = [{"kind": "commit_result", "i": 0, "op": "create_room_separation",
+                "created_ids": [], "touched_ids": []}]
+    kind, payload, _ = ts.commit_result_evidence(records, 0)
+    assert kind == "ok"
+    assert payload["created_ids"] == []
+
+
+def test_commit_result_evidence_duplicate_identical_records_is_ok():
+    records = [
+        {"kind": "commit_result", "i": 0, "op": "create_room", "created_ids": [5], "touched_ids": []},
+        {"kind": "commit_result", "i": 0, "op": "create_room", "created_ids": [5], "touched_ids": []},
+    ]
+    kind, payload, reason = ts.commit_result_evidence(records, 0)
+    assert kind == "ok"
+    assert reason is None
+    assert payload["created_ids"] == [5]
+
+
+def test_commit_result_evidence_conflicting_created_ids_fails_closed():
+    records = [
+        {"kind": "commit_result", "i": 0, "op": "create_room", "created_ids": [5], "touched_ids": []},
+        {"kind": "commit_result", "i": 0, "op": "create_room", "created_ids": [6], "touched_ids": []},
+    ]
+    assert ts.commit_result_evidence(records, 0) == ("conflict", None, "commit_result_conflict")
+
+
+def test_commit_result_evidence_conflicting_touched_ids_fails_closed():
+    records = [
+        {"kind": "commit_result", "i": 0, "op": "move_elements", "created_ids": [], "touched_ids": [1]},
+        {"kind": "commit_result", "i": 0, "op": "move_elements", "created_ids": [], "touched_ids": [2]},
+    ]
+    kind, _, reason = ts.commit_result_evidence(records, 0)
+    assert kind == "conflict" and reason == "commit_result_conflict"
+
+
+def test_commit_result_evidence_op_mismatch_fails_closed():
+    records = [
+        {"kind": "commit_result", "i": 0, "op": "create_room", "created_ids": [5], "touched_ids": []},
+        {"kind": "commit_result", "i": 0, "op": "place_family", "created_ids": [5], "touched_ids": []},
+    ]
+    kind, _, reason = ts.commit_result_evidence(records, 0)
+    assert kind == "conflict" and reason == "commit_result_conflict"
+
+
+def test_commit_result_evidence_scoped_to_the_requested_action_index():
+    records = [
+        {"kind": "commit_result", "i": 0, "op": "create_room", "created_ids": [1], "touched_ids": []},
+        {"kind": "commit_result", "i": 1, "op": "place_family", "created_ids": [2], "touched_ids": []},
+    ]
+    assert ts.commit_result_evidence(records, 1)[1]["created_ids"] == [2]
+    assert ts.commit_result_evidence(records, 5) == ("absent", None, None)
+
+
+# ---------------------------------------------------------------------------
+# ledger_conflicts -- surfaced anomaly channel, agreement is NOT reported
+# ---------------------------------------------------------------------------
+
+def test_ledger_conflicts_empty_when_nothing_present():
+    assert ts.ledger_conflicts([]) == []
+
+
+def test_ledger_conflicts_agreement_between_commit_result_and_action_end_is_silent():
+    records = [
+        {"kind": "commit_result", "i": 0, "op": "create_room", "created_ids": [5], "touched_ids": []},
+        {"kind": "action_end", "i": 0, "status": "done", "created_ids": [5]},
+    ]
+    assert ts.ledger_conflicts(records) == []
+
+
+def test_ledger_conflicts_disagreement_between_commit_result_and_action_end_is_reported():
+    records = [
+        {"kind": "commit_result", "i": 0, "op": "create_room", "created_ids": [5], "touched_ids": []},
+        {"kind": "action_end", "i": 0, "status": "done", "created_ids": [6]},
+    ]
+    conflicts = ts.ledger_conflicts(records)
+    assert len(conflicts) == 1
+    assert conflicts[0]["kind"] == "commit_result_vs_action_end"
+    assert conflicts[0]["commit_result_ids"] == [5]
+    assert conflicts[0]["action_end_ids"] == [6]
+
+
+def test_ledger_conflicts_commit_result_only_no_action_end_yet_is_silent():
+    """The normal open-action window: a commit_result exists but the
+    action hasn't finished (no action_end yet) -- not a conflict, just
+    incomplete, and must not be reported as one."""
+    records = [{"kind": "commit_result", "i": 0, "op": "create_room", "created_ids": [5], "touched_ids": []}]
+    assert ts.ledger_conflicts(records) == []
+
+
+def test_ledger_conflicts_multiple_disagreeing_commit_results_reported_as_conflict():
+    records = [
+        {"kind": "commit_result", "i": 0, "op": "create_room", "created_ids": [5], "touched_ids": []},
+        {"kind": "commit_result", "i": 0, "op": "create_room", "created_ids": [6], "touched_ids": []},
+    ]
+    conflicts = ts.ledger_conflicts(records)
+    assert len(conflicts) == 1
+    assert conflicts[0]["kind"] == "commit_result_conflict"
+
+
+def test_ledger_conflicts_multiple_actions_only_disagreeing_one_reported():
+    records = [
+        {"kind": "commit_result", "i": 0, "op": "create_room", "created_ids": [1], "touched_ids": []},
+        {"kind": "action_end", "i": 0, "status": "done", "created_ids": [1]},
+        {"kind": "commit_result", "i": 1, "op": "place_family", "created_ids": [2], "touched_ids": []},
+        {"kind": "action_end", "i": 1, "status": "done", "created_ids": [999]},
+    ]
+    conflicts = ts.ledger_conflicts(records)
+    assert len(conflicts) == 1
+    assert conflicts[0]["i"] == 1
+
+
+def test_commit_result_in_known_ledger_kinds():
+    assert "commit_result" in ts.KNOWN_LEDGER_KINDS
+
+
+def test_fold_progress_surfaces_ledger_conflicts_field():
+    records = [
+        {"kind": "commit_result", "i": 0, "op": "create_room", "created_ids": [5], "touched_ids": []},
+        {"kind": "action_end", "i": 0, "status": "done", "created_ids": [6]},
+    ]
+    progress = ts.fold_progress(records)
+    assert progress["ledger_conflicts"] and progress["ledger_conflicts"][0]["kind"] == "commit_result_vs_action_end"
+
+
+def test_fold_progress_ledger_conflicts_empty_for_a_clean_ledger():
+    progress = ts.fold_progress(_sample_records())
+    assert progress["ledger_conflicts"] == []
+
+
+def test_fold_progress_does_not_flag_commit_result_as_an_unknown_kind():
+    records = [{"kind": "commit_result", "i": 0, "op": "create_room", "created_ids": [5], "touched_ids": []}]
+    progress = ts.fold_progress(records)
+    assert "commit_result" not in progress["unknown_ledger_kinds"]
+
+
+# ---------------------------------------------------------------------------
 # projection fold -- determinism, unknown kinds, verdict rollup
 # ---------------------------------------------------------------------------
 
