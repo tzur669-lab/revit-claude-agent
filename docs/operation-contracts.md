@@ -440,13 +440,21 @@ accumulating. `set_parameters`/`set_wall_curve`/`delete_elements` are
 naturally absolute (setting the same value or deleting an already-deleted id
 is a no-op the second time). The four `creating` ops make a duplicate on
 reapplication, so a crash inside their transaction window (`action_begin`
-logged, no matching `action_end`) is resolved by `probe(doc, args, before)` —
+logged, no matching `action_end`) is resolved by
+`probe(doc, args, before) -> (outcome, recovered_ids)` —
 `"applied"` skips, `"not_applied"` re-runs, `"unknown"` (including every
 creating op that has no conclusive membership test — `create_room_separation`,
-`create_line_based_element`, `place_family` all return `"unknown"`
+`create_line_based_element`, `place_family` all return `("unknown", None)`
 unconditionally today) blocks the task for human review rather than guessing.
 `create_room`'s probe uses `doc.GetRoomAtPoint` — the only one of the four
-with a real membership test in this pass.
+with a real membership test in this pass — and, since Phase B slice 2,
+returns the real recovered room id on `"applied"` (`("applied", [room_id])`)
+instead of discarding it: `success_criteria`'s `created_by` target kind can
+then resolve a `create_room` action's output correctly even after a
+crash-resume skip, not just a normal run. The other three probes stay
+`("unknown", None)` unconditionally — a `created_by` reference to one of
+their probe-skipped actions still resolves to `invalid_reference`, honestly,
+same as before.
 
 ### Unexpected-change detection (`tools/plan_tools.py::_check_unexpected_changes`)
 
@@ -527,12 +535,68 @@ an unrelated unknown). Else any non-`"passed"` status present (including
 `"completed"` task with `design_ok: False` is a legitimate, disclosed
 terminal state — this never escalates the task's own outcome to `"failed"`.
 
-**Known, disclosed limitation:** a criterion can only target an element
-whose id is known at propose time — not one a plan's own action creates
-(the same limitation `expected_changes.created` already has; see the "Known
-gap" note above). No new ref kinds — a Room/Level is already addressable
-through the existing `"element"` kind; `unit`/`zone` have no existing
-concept anywhere in this codebase to build one from.
+No new ref kinds — a Room/Level is already addressable through the existing
+`"element"` kind; `unit`/`zone` have no existing concept anywhere in this
+codebase to build one from.
+
+### Referring to a plan's own output (Phase B, slice 2)
+
+`success_criteria`'s `target` gains a second kind, `{"kind": "created_by",
+"action_i": N, "index": 0}` — the element(s) action `N`'s `run()` created,
+by index into its `action_end.created_ids` (default `0`). Schema-validated
+at propose time: `action_i` must name a known action whose op is
+`idempotency: "creating"` (referencing e.g. `move_elements` is rejected
+before execution, not left to fail silently as `invalid_reference`).
+Deliberately **not** available to an action's own `targets` — only
+`success_criteria` (evaluated after every action has already committed)
+can meaningfully reference an id that didn't exist at propose time.
+
+**Composed references — a new, additive `targets` (plural) field**, for
+when one `target` dict can't express two independently-sourced ids (an
+existing element paired with one a plan creates, or two different
+actions' outputs): a list of single-source refs, each `"element"`
+(exactly one id) or `"created_by"`, each resolving to exactly one id. A
+criterion has exactly one of `target` / `targets` — the existing,
+shipped `target: {"kind": "element", "ids": [id1, id2]}` shape
+(including `distance_mm`'s 2-id case) is **unchanged**. One function,
+`evaluators.py::_resolve_criterion_targets`, resolves both shapes for
+every evaluator.
+
+**Measured, not assumed: `create_room_separation` never produces more
+than one output through this wiring.** `rooms.apply_create_room_separation`
+(the shared, general helper) accepts a multi-curve array, which is why
+`created_by`'s `index` field exists at all — but `ops.py`'s own
+`_room_sep_run` (the specific call the plan/task system makes) only ever
+builds a **one**-curve array from its single `curve_mm` arg, so
+`created_ids` is always exactly one id through this path today, same as
+the other three creating ops. `index` stays in the schema (harmless,
+forward-compatible) but is unexercised beyond `0` by any op that exists
+today.
+
+**A `created_by` reference to a probe-skipped action** (see the probe
+contract change above) resolves cleanly for `create_room` (its probe
+recovers the real id) and honestly to `invalid_reference` for the other
+three creating ops (no membership test exists for them yet) — never a
+guess either way. The result-status vocabulary did **not** grow for this:
+`design_ok`'s aggregation already treats every non-`"passed"`/non-`"failed"`
+status identically, so a finer-grained status would change no aggregation
+behaviour, only prose — `invalid_reference`'s `reason` string carries the
+specific detail instead.
+
+**Live-verified**: a plan created 4 temporary walls then a room inside
+them (`needs: [0,1,2,3]`) — `room_area_sqm` on `created_by(action_i=4)`
+read the room's real, positive area (13.33 sqm); `element_exists` on
+`created_by(action_i=0)` (a wall) passed; a composed `distance_mm`
+(existing family instance + `created_by(action_i=4)`) measured a real
+428 m. `design_ok` correctly dominated by one deliberately-failing
+threshold. `_room_probe`'s recovered id was confirmed to match the real
+created room directly. All 5 elements deleted afterward, tracker
+checkpoint diff net-zero.
+
+Still out of scope, disclosed not solved: an action's own `targets`
+referencing a prior action's output (needs mid-slice resolution, a
+separate, larger feature); real membership probes for the other three
+creating ops (Phase A's own disclosed gap, unrelated to this slice's job).
 
 ---
 

@@ -69,7 +69,7 @@ def validate_plan(plan):
     if cycle:
         errors.append("actions form a 'needs' dependency cycle: %s" % (cycle,))
 
-    errors.extend(_validate_success_criteria(plan.get("success_criteria")))
+    errors.extend(_validate_success_criteria(plan.get("success_criteria"), actions))
     errors.extend(_validate_policy(plan.get("policy")))
     errors.extend(_validate_expected_changes(plan.get("expected_changes")))
 
@@ -142,7 +142,61 @@ def _validate_actions(actions):
     return errors
 
 
-def _validate_success_criteria(sc):
+def _validate_single_ref(ref, idx, ev, by_i, label):
+    """(count_or_None, errors) for ONE single-source reference -- either
+    the singular `target` field, or one entry of the plural `targets`
+    list. `count` is how many element ids this ref will resolve to at
+    evaluation time: an "element" ref contributes len(ids); a
+    "created_by" ref always contributes exactly 1 once its own shape is
+    valid (one index into one action's output). None means the ref's own
+    shape was already invalid -- nothing further should be counted
+    against it, matching how a malformed target already skips the
+    cardinality check below rather than compounding one error into two.
+
+    "created_by".action_i must reference a KNOWN action whose op is
+    idempotency=="creating" -- referencing e.g. a move_elements action (which
+    never creates anything) is rejected here, at propose time, not left to
+    fail silently as invalid_reference at evaluation time."""
+    errors = []
+    if not isinstance(ref, dict) or ref.get("kind") not in ops_schema.CRITERION_TARGET_KINDS:
+        errors.append("success_criteria[%d] (evaluator=%r): %s.kind must be one of %s"
+                       % (idx, ev, label, sorted(ops_schema.CRITERION_TARGET_KINDS)))
+        return None, errors
+
+    kind = ref.get("kind")
+    if kind == "element":
+        ids = ref.get("ids")
+        if not isinstance(ids, list) or not ids:
+            errors.append("success_criteria[%d] (evaluator=%r): %s.ids must be a non-empty list"
+                           % (idx, ev, label))
+            return None, errors
+        return len(ids), errors
+
+    # kind == "created_by"
+    action_i = ref.get("action_i")
+    action = by_i.get(action_i)
+    if action is None:
+        errors.append("success_criteria[%d] (evaluator=%r): %s.action_i %r does not reference a "
+                       "known action" % (idx, ev, label, action_i))
+        return None, errors
+    op_spec = ops_schema.OPS.get(action.get("op"))
+    if op_spec is None or op_spec["idempotency"] != "creating":
+        errors.append(
+            "success_criteria[%d] (evaluator=%r): %s.action_i %r's op %r does not create "
+            "anything (idempotency must be 'creating') -- created_by can only reference a "
+            "create_room/create_room_separation/create_line_based_element/place_family action"
+            % (idx, ev, label, action_i, action.get("op"))
+        )
+        return None, errors
+    index = ref.get("index", 0)
+    if isinstance(index, bool) or not isinstance(index, int) or index < 0:
+        errors.append("success_criteria[%d] (evaluator=%r): %s.index must be a non-negative int, "
+                       "got %r" % (idx, ev, label, index))
+        return None, errors
+    return 1, errors
+
+
+def _validate_success_criteria(sc, actions):
     """Shape-only, zero Revit access (CPython validates the document; Revit
     validates the world -- see this module's own docstring). Beyond the
     evaluator/op/target checks that already existed, this also validates
@@ -158,10 +212,20 @@ def _validate_success_criteria(sc):
     Operator-vs-actual-value-type compatibility (e.g. ">=" against a String
     parameter) is NOT checked here -- CPython never sees the live
     parameter's StorageType at propose time. That check is deferred to
-    revit_mcp.eval_support.compare() at evaluation time."""
+    revit_mcp.eval_support.compare() at evaluation time.
+
+    `target` (a single ref, unchanged since slice 1 -- "element" with a
+    batch of ids, or new: "created_by") and `targets` (plural, new: a list
+    of single-source refs, for a composed reference like an existing
+    element paired with one a plan action creates) are mutually exclusive
+    -- exactly one must be present. `actions` (already normalized to a
+    list by validate_plan before this is called) is needed only to
+    cross-reference a `created_by` ref's `action_i`."""
     errors = []
     if not isinstance(sc, list):
         return ["success_criteria must be a list"]
+    by_i = dict((a.get("i"), a) for a in actions if isinstance(a, dict) and "i" in a)
+
     for idx, c in enumerate(sc):
         if not isinstance(c, dict):
             errors.append("success_criteria[%d] is not an object" % idx)
@@ -179,16 +243,35 @@ def _validate_success_criteria(sc):
             errors.append("success_criteria[%d]: op must be one of %s"
                            % (idx, sorted(CRITERION_OPS)))
 
-        target = c.get("target")
-        target_ids = None
-        if not isinstance(target, dict) or target.get("kind") not in REF_KINDS:
-            errors.append("success_criteria[%d]: target.kind must be one of %s"
-                           % (idx, sorted(REF_KINDS)))
+        has_target = "target" in c
+        has_targets = "targets" in c
+        target_count = None
+        if has_target == has_targets:  # both present, or neither
+            errors.append(
+                "success_criteria[%d]: exactly one of 'target' or 'targets' must be present, got %s"
+                % (idx, "both" if has_target else "neither")
+            )
+        elif has_target:
+            target_count, ref_errors = _validate_single_ref(c.get("target"), idx, ev, by_i, "target")
+            errors.extend(ref_errors)
         else:
-            target_ids = target.get("ids")
-            if not isinstance(target_ids, list) or not target_ids:
-                errors.append("success_criteria[%d]: target.ids must be a non-empty list" % idx)
-                target_ids = None
+            targets_val = c.get("targets")
+            if not isinstance(targets_val, list) or not targets_val:
+                errors.append("success_criteria[%d]: 'targets' must be a non-empty list" % idx)
+            else:
+                counts = []
+                for j, ref in enumerate(targets_val):
+                    cnt, ref_errors = _validate_single_ref(ref, idx, ev, by_i, "targets[%d]" % j)
+                    errors.extend(ref_errors)
+                    if cnt is not None and cnt != 1:
+                        errors.append(
+                            "success_criteria[%d]: targets[%d] must resolve to exactly 1 id -- a "
+                            "batch 'element' ref belongs in the singular 'target' field, not "
+                            "inside 'targets'" % (idx, j)
+                        )
+                    counts.append(cnt)
+                if all(cnt is not None for cnt in counts):
+                    target_count = len(targets_val)
 
         if ev_spec is None:
             continue  # nothing more to check against an unknown evaluator's own arg contract
@@ -220,10 +303,10 @@ def _validate_success_criteria(sc):
                            % (idx, ev))
 
         exact_n = ops_schema.EXACT_TARGET_COUNT.get(ev)
-        if exact_n is not None and target_ids is not None and len(target_ids) != exact_n:
+        if exact_n is not None and target_count is not None and target_count != exact_n:
             errors.append(
-                "success_criteria[%d] (evaluator=%r): target.ids must have exactly %d id(s), got %d"
-                % (idx, ev, exact_n, len(target_ids))
+                "success_criteria[%d] (evaluator=%r): target(s) must resolve to exactly %d id(s), "
+                "got %d" % (idx, ev, exact_n, target_count)
             )
 
     return errors

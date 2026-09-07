@@ -505,6 +505,38 @@ def find_open_action(task_dir):
     return list(begins.values())[0]
 
 
+def created_ids_by_action(records):
+    """{action_i: [created_id, ...]} -- Phase B slice 2's success_criteria
+    "created_by" target kind resolves against this. Built from
+    action_end records with status in ("done", "skipped") only: "failed"
+    never contributes (and, by the time criteria evaluate, can never be
+    present anyway -- _run_slice's own "did the whole plan finish" check
+    excludes "failed" from done_now, so a plan can only reach outcome
+    "completed" once every action is "done" or "skipped", traced not
+    assumed). A "skipped" record's created_ids is normally [] (a
+    crash-resume skip has no way to know what a probe-unknown creating op
+    produced) except for create_room, whose probe CAN recover the real id
+    (ops.py::_room_probe via GetRoomAtPoint) -- plan_exec.py writes that
+    recovered id into the skip's own action_end record, so it shows up
+    here identically to a normal run.
+
+    Iterates records in file/seq order; a later action_end for the same
+    `i` overwrites an earlier one -- the same last-one-wins determinism
+    find_open_action already established for exactly this "more than one
+    record for the same i" situation, not a new rule invented here. In a
+    non-corrupt ledger this never actually happens (at most one
+    action_end per i, per _run_slice's own done_indices tracking), so this
+    is defensive, not load-bearing."""
+    out = {}
+    for rec in records:
+        if rec.get("kind") != "action_end":
+            continue
+        if rec.get("status") not in ("done", "skipped"):
+            continue
+        out[rec.get("i")] = list(rec.get("created_ids") or [])
+    return out
+
+
 # ---------------------------------------------------------------------------
 # projection -- pure fold over the ledger, no I/O, no clock reads
 # ---------------------------------------------------------------------------

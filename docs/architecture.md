@@ -420,13 +420,90 @@ verification-script gotcha (the shipped module content was already
 correct), not a product bug — noted here because it will bite the next
 live fresh-reimport test that doesn't know to clear both.
 
-**Known, disclosed limitations, not solved here:** a criterion can only
-target an element whose id is known at propose time — not one a plan's own
-action creates (the same limitation `expected_changes.created` already
-has). No new ref kinds (`room`/`unit`/`level`/`zone`) — a Room and a Level
-are both ordinary elements already addressable through the one existing
+No new ref kinds (`room`/`unit`/`level`/`zone`) — a Room and a Level are
+both ordinary elements already addressable through the one existing
 `"element"` kind; `unit`/`zone` have no existing concept anywhere in this
 codebase or model, so nothing was invented for them.
+
+### Phase B, slice 2: referring to what a plan creates
+
+Slice 1 disclosed one limitation: a criterion could only target an element
+whose id is known at propose time, not one a plan's own action creates —
+the single most natural pairing this whole mechanism exists for
+("create this room, then check its own area") was impossible. Closed
+2026-09-07, after an adversarial review found the first draft accepted two
+real weaknesses without first tracing the actual code:
+
+**`created_by`, a new target kind for `success_criteria` only** (an
+action's own `targets` is untouched — still limited to `"element"`, since
+an action can't target something that doesn't exist yet when
+`plan_exec.py` resolves it): `{"kind": "created_by", "action_i": N, "index":
+0}` — `action_i` names the plan action whose `run()` created the element;
+`index` selects among that action's `created_ids` (schema-validated: the
+referenced action must exist and be an `idempotency: "creating"` op —
+referencing e.g. a `move_elements` action is rejected at propose time, not
+left to fail silently at evaluation time).
+
+**A real recoverability finding, not a speculative fix:** `ops.py`'s
+`_room_probe` — the function that decides whether a `create_room` action
+crash-resumed via probe-skip already applied — computes the real, resolved
+room id via `doc.GetRoomAtPoint` and used to discard it, returning only the
+bare string `"applied"`. It now returns `("applied", [that_id])`, so a
+`created_by` reference to a probe-skipped `create_room` action **can**
+resolve correctly after a crash-resume. The other three creating ops
+(`create_room_separation`, `create_line_based_element`, `place_family`)
+have no membership test at all yet — a pre-existing, disclosed Phase A
+limitation, unsolved here since building one is a separate, larger
+undertaking with no evidence forcing it into this slice; a `created_by`
+reference to one of their probe-skipped actions still resolves to
+`invalid_reference`, honestly.
+
+**Composed references — an additive, backward-compatible schema
+change:** the existing `target` field (a single ref — `"element"` with a
+batch of ids, unchanged, or now also `"created_by"`, a single id) keeps
+working exactly as shipped in slice 1. A new, sibling `targets` field
+(plural — a list of single-source refs, each independently `"element"` or
+`"created_by"`, each resolving to exactly one id) lets `distance_mm`
+compare an existing element against one a plan creates, or two elements
+two different actions create — a single `target` dict cannot express two
+independently-sourced ids. A criterion has exactly one of `target` /
+`targets`. One function, `evaluators.py::_resolve_criterion_targets`,
+resolves both shapes for all 5 evaluators — centralized once rather than
+each evaluator branching on shape itself.
+
+**The result-status vocabulary did not grow.** `design_ok`'s aggregation
+already treats every non-`"passed"`/non-`"failed"` status identically
+(`None`, never promoted), so a `created_by`-specific status
+(`ambiguous_output`, `unrecoverable_output`, …) would change no aggregation
+behaviour — only prose. `invalid_reference`'s `reason` string carries the
+specific detail instead ("action 2 produced no output — …" vs. "index 1
+out of range: action 2 produced 1 output(s)" vs. "action_i 3 is not a
+'creating' op").
+
+**A real correction the live test forced, worth recording precisely:**
+the plan's own first draft assumed `create_room_separation` could produce
+more than one output in a single action (`rooms.apply_create_room_separation`
+does accept a multi-curve array in general). Measured: `ops.py`'s own
+`_room_sep_run` — the specific wiring the plan/task system calls — only
+ever builds a **one**-curve array from its single `curve_mm` arg, so
+`created_ids` is always exactly one id through this path today, same as
+the other three creating ops. `index` stays in the schema (harmless,
+forward-compatible if a future op ever produces more than one output) but
+is unexercised beyond `0` by any op that exists today — documented as
+measured, not assumed, per this project's own rule.
+
+**Live-verified end-to-end**, the realistic multi-action shape this slice
+exists for: a plan created 4 temporary walls (actions 0–3, a small
+enclosure far outside the real building) then a room inside them (action 4,
+declared `needs: [0,1,2,3]`) — `room_area_sqm` on `created_by(action_i=4)`
+read the room's real, positive area (13.33 sqm) against both a passing and
+a failing threshold; `element_exists` on `created_by(action_i=0)` (a wall)
+passed; a composed `distance_mm` (`targets`: an existing real family
+instance + `created_by(action_i=4)`) measured a real 428 m and passed.
+`design_ok` folded to `False`, correctly dominated by the one failing
+threshold. `_room_probe`'s recovered id was directly confirmed to match the
+real created room's id. All 5 elements were deleted afterward and the
+tracker's own checkpoint diff confirmed net-zero.
 
 ---
 

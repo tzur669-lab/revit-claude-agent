@@ -417,18 +417,24 @@ def _room_inverse(args, targets, before, result):
 
 
 def _room_probe(doc, args, before):
-    """applied: a room now exists at the point that did not at capture
-    time. not_applied: same as capture time. unknown: anything else
-    (including no point_mm to test at all) -- never guessed."""
+    """(outcome, recovered_ids) -- applied: a room now exists at the point
+    that did not at capture time, and recovered_ids is [that room's id],
+    since GetRoomAtPoint already resolved the real element as part of
+    making this determination (Phase B slice 2: this used to discard that
+    id, forcing a later created_by reference to a probe-skipped create_room
+    into invalid_reference even though the room was right there). not_applied:
+    same as capture time, recovered_ids is None. unknown: anything else
+    (including no point_mm to test at all) -- never guessed, recovered_ids
+    is None."""
     if before is None:
-        return "unknown"
+        return "unknown", None
     current_id = _room_at_point(doc, args.get("point_mm"))
     was_id = before.get("existing_room_id")
     if current_id == was_id:
-        return "not_applied"
+        return "not_applied", None
     if current_id is not None and was_id is None:
-        return "applied"
-    return "unknown"
+        return "applied", [current_id]
+    return "unknown", None
 
 
 # ===========================================================================
@@ -486,12 +492,14 @@ def _room_sep_inverse(args, targets, before, result):
 
 
 def _room_sep_probe(doc, args, before):
-    """Room separation lines have no natural point-membership test the way
-    Rooms do (GetRoomAtPoint). A conclusive probe would need a
-    near-duplicate-curve scan, not implemented in Phase A -- always
-    unknown, so a crash in this op's transaction window always blocks
-    rather than guesses whether a duplicate line would result."""
-    return "unknown"
+    """(outcome, recovered_ids) -- room separation lines have no natural
+    point-membership test the way Rooms do (GetRoomAtPoint). A conclusive
+    probe would need a near-duplicate-curve scan, not implemented in Phase
+    A -- always ("unknown", None), so a crash in this op's transaction
+    window always blocks rather than guesses whether a duplicate line
+    would result, and a later created_by reference to this action's output
+    after such a resume is honestly invalid_reference, not a guess."""
+    return "unknown", None
 
 
 # ===========================================================================
@@ -534,10 +542,10 @@ def _line_elem_inverse(args, targets, before, result):
 
 
 def _line_elem_probe(doc, args, before):
-    """No natural membership test for 'a wall already exists on this
-    curve' without a geometry scan -- not implemented in Phase A. Always
-    unknown."""
-    return "unknown"
+    """(outcome, recovered_ids) -- no natural membership test for 'a wall
+    already exists on this curve' without a geometry scan -- not
+    implemented in Phase A. Always ("unknown", None)."""
+    return "unknown", None
 
 
 # ===========================================================================
@@ -573,10 +581,10 @@ def _place_inverse(args, targets, before, result):
 
 
 def _place_probe(doc, args, before):
-    """No natural membership test for 'this family is already placed
-    here' without a spatial scan -- not implemented in Phase A. Always
-    unknown."""
-    return "unknown"
+    """(outcome, recovered_ids) -- no natural membership test for 'this
+    family is already placed here' without a spatial scan -- not
+    implemented in Phase A. Always ("unknown", None)."""
+    return "unknown", None
 
 
 # ===========================================================================

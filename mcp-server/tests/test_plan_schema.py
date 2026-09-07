@@ -402,6 +402,167 @@ def test_empty_target_ids_rejected_for_every_evaluator():
 
 
 # ---------------------------------------------------------------------------
+# created_by / targets (plural) -- Phase B slice 2
+# ---------------------------------------------------------------------------
+
+def _plan_with_create_room_action():
+    """actions[0] stays the base fixture's move_elements (i=0); adds a
+    create_room action at i=1 -- the "creating" action created_by tests
+    reference."""
+    plan = _valid_plan()
+    plan["actions"].append({
+        "i": 1, "phase": 0, "op": "create_room",
+        "targets": {"kind": "element", "ids": [1]},
+        "args": {"level_id": 100, "point_mm": {"x": 0, "y": 0, "z": 0}},
+        "intent": "create a room", "reversible": True, "needs": [],
+    })
+    return plan
+
+
+def test_created_by_referencing_a_real_creating_action_accepted():
+    plan = _plan_with_create_room_action()
+    plan["success_criteria"] = [{
+        "id": "S1", "evaluator": "room_area_sqm", "op": ">=", "value": 9.0,
+        "target": {"kind": "created_by", "action_i": 1, "index": 0},
+    }]
+    ok, errors = ps.validate_plan(plan)
+    assert ok, errors
+
+
+def test_created_by_index_defaults_to_zero():
+    plan = _plan_with_create_room_action()
+    plan["success_criteria"] = [{
+        "id": "S1", "evaluator": "room_area_sqm", "op": ">=", "value": 9.0,
+        "target": {"kind": "created_by", "action_i": 1},
+    }]
+    ok, errors = ps.validate_plan(plan)
+    assert ok, errors
+
+
+def test_created_by_unknown_action_i_rejected():
+    plan = _plan_with_create_room_action()
+    plan["success_criteria"] = [{
+        "id": "S1", "evaluator": "room_area_sqm", "op": ">=", "value": 9.0,
+        "target": {"kind": "created_by", "action_i": 99},
+    }]
+    ok, errors = ps.validate_plan(plan)
+    assert not ok
+    assert any("does not reference a known action" in e for e in errors)
+
+
+def test_created_by_non_creating_action_rejected():
+    """action_i=0 is move_elements -- idempotency 'absolute', never creates
+    anything. Must be rejected at propose time, not left to fail silently
+    as invalid_reference at evaluation time."""
+    plan = _plan_with_create_room_action()
+    plan["success_criteria"] = [{
+        "id": "S1", "evaluator": "room_area_sqm", "op": ">=", "value": 9.0,
+        "target": {"kind": "created_by", "action_i": 0},
+    }]
+    ok, errors = ps.validate_plan(plan)
+    assert not ok
+    assert any("does not create anything" in e for e in errors)
+
+
+def test_created_by_negative_index_rejected():
+    plan = _plan_with_create_room_action()
+    plan["success_criteria"] = [{
+        "id": "S1", "evaluator": "room_area_sqm", "op": ">=", "value": 9.0,
+        "target": {"kind": "created_by", "action_i": 1, "index": -1},
+    }]
+    ok, errors = ps.validate_plan(plan)
+    assert not ok
+    assert any("index must be a non-negative int" in e for e in errors)
+
+
+def test_created_by_non_int_index_rejected():
+    plan = _plan_with_create_room_action()
+    plan["success_criteria"] = [{
+        "id": "S1", "evaluator": "room_area_sqm", "op": ">=", "value": 9.0,
+        "target": {"kind": "created_by", "action_i": 1, "index": "0"},
+    }]
+    ok, errors = ps.validate_plan(plan)
+    assert not ok
+    assert any("index must be a non-negative int" in e for e in errors)
+
+
+def test_target_and_targets_both_present_rejected():
+    plan = _plan_with_create_room_action()
+    plan["success_criteria"] = [{
+        "id": "S1", "evaluator": "element_exists", "op": "==",
+        "target": {"kind": "element", "ids": [1658707]},
+        "targets": [{"kind": "element", "ids": [1658707]}],
+    }]
+    ok, errors = ps.validate_plan(plan)
+    assert not ok
+    assert any("exactly one of 'target' or 'targets'" in e for e in errors)
+
+
+def test_neither_target_nor_targets_present_rejected():
+    plan = _plan_with_create_room_action()
+    plan["success_criteria"] = [{"id": "S1", "evaluator": "element_exists", "op": "=="}]
+    ok, errors = ps.validate_plan(plan)
+    assert not ok
+    assert any("exactly one of 'target' or 'targets'" in e for e in errors)
+
+
+def test_targets_entry_with_a_batch_element_ref_rejected():
+    """A >1-id 'element' ref belongs in the singular 'target' field -- each
+    entry of 'targets' must resolve to exactly one id."""
+    plan = _plan_with_create_room_action()
+    plan["success_criteria"] = [{
+        "id": "S1", "evaluator": "distance_mm", "op": ">=", "value": 100.0,
+        "targets": [{"kind": "element", "ids": [1658707, 1660265]},
+                    {"kind": "created_by", "action_i": 1}],
+    }]
+    ok, errors = ps.validate_plan(plan)
+    assert not ok
+    assert any("must resolve to exactly 1 id" in e for e in errors)
+
+
+def test_composed_element_and_created_by_targets_accepted():
+    plan = _plan_with_create_room_action()
+    plan["success_criteria"] = [{
+        "id": "S1", "evaluator": "distance_mm", "op": ">=", "value": 100.0,
+        "targets": [{"kind": "element", "ids": [1658707]},
+                    {"kind": "created_by", "action_i": 1}],
+    }]
+    ok, errors = ps.validate_plan(plan)
+    assert ok, errors
+
+
+def test_composed_created_by_and_created_by_targets_accepted():
+    plan = _plan_with_create_room_action()
+    plan["actions"].append({
+        "i": 2, "phase": 0, "op": "create_room",
+        "targets": {"kind": "element", "ids": [1]},
+        "args": {"level_id": 100, "point_mm": {"x": 5000, "y": 0, "z": 0}},
+        "intent": "create a second room", "reversible": True, "needs": [],
+    })
+    plan["success_criteria"] = [{
+        "id": "S1", "evaluator": "distance_mm", "op": ">=", "value": 100.0,
+        "targets": [{"kind": "created_by", "action_i": 1},
+                    {"kind": "created_by", "action_i": 2}],
+    }]
+    ok, errors = ps.validate_plan(plan)
+    assert ok, errors
+
+
+def test_single_created_by_target_cannot_satisfy_distance_mm_cardinality():
+    """A single created_by ref always resolves to exactly 1 id --
+    distance_mm needs exactly 2, so this must be a clean validation error,
+    not a runtime surprise."""
+    plan = _plan_with_create_room_action()
+    plan["success_criteria"] = [{
+        "id": "S1", "evaluator": "distance_mm", "op": ">=", "value": 100.0,
+        "target": {"kind": "created_by", "action_i": 1},
+    }]
+    ok, errors = ps.validate_plan(plan)
+    assert not ok
+    assert any("exactly 2 id(s)" in e for e in errors)
+
+
+# ---------------------------------------------------------------------------
 # policy / expected_changes
 # ---------------------------------------------------------------------------
 

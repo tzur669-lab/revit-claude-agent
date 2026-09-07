@@ -150,27 +150,35 @@ def preflight(doc, plan, approval=None):
 # ---------------------------------------------------------------------------
 
 def _classify_open_action(doc, open_action):
-    """(decision, note) where decision in "run" | "skip" | "block".
-    "absolute"-class ops converge on re-application, so an unknown outcome
-    is always safe to just run again. "creating"-class ops must probe()."""
+    """(decision, note, recovered_ids) where decision in "run" | "skip" |
+    "block". "absolute"-class ops converge on re-application, so an
+    unknown outcome is always safe to just run again. "creating"-class ops
+    must probe(). recovered_ids is None except for a "skip" whose probe()
+    could conclusively resolve the actual created element (Phase B slice
+    2: create_room's probe already resolves it via GetRoomAtPoint; the
+    other three creating ops' probes are unconditional ("unknown", None) --
+    a pre-existing, disclosed Phase A limitation, not solved here) -- when
+    present, the caller can record the real id instead of an empty
+    created_ids, which is what makes a later created_by reference to this
+    action's output resolvable after a crash-resume skip."""
     op_name = open_action.get("op")
     spec = ops.OPS.get(op_name)
     if spec is None:
-        return "block", "unknown op %r for open action" % (op_name,)
+        return "block", "unknown op %r for open action" % (op_name,), None
     if spec["idempotency"] == "absolute":
-        return "run", "absolute op - safe to re-apply"
+        return "run", "absolute op - safe to re-apply", None
     probe_fn = spec.get("probe")
     if probe_fn is None:
-        return "block", "creating op with no probe()"
+        return "block", "creating op with no probe()", None
     try:
-        outcome = probe_fn(doc, open_action.get("args") or {}, open_action.get("before"))
+        outcome, recovered_ids = probe_fn(doc, open_action.get("args") or {}, open_action.get("before"))
     except Exception as e:
-        return "block", "probe() raised: %s" % str(e)
+        return "block", "probe() raised: %s" % str(e), None
     if outcome == "not_applied":
-        return "run", "probe: not yet applied"
+        return "run", "probe: not yet applied", None
     if outcome == "applied":
-        return "skip", "probe: already applied"
-    return "block", "probe: outcome unknown"
+        return "skip", "probe: already applied", recovered_ids
+    return "block", "probe: outcome unknown", None
 
 
 # ---------------------------------------------------------------------------
@@ -195,7 +203,7 @@ def _run_slice(doc, task_id, task_dir, plan, policy, budget_ms, cancel_check_ena
         return {"outcome": "blocked", "review_reasons": ["ledger_corrupt"],
                 "note": "more than one open action in the ledger"}
     if open_action is not None:
-        decision, note = _classify_open_action(doc, open_action)
+        decision, note, recovered_ids = _classify_open_action(doc, open_action)
         i = open_action.get("i")
         if decision == "block":
             return {"outcome": "blocked", "review_reasons": ["unknown_action_outcome"], "note": note}
@@ -203,7 +211,8 @@ def _run_slice(doc, task_id, task_dir, plan, policy, budget_ms, cancel_check_ena
             task_store.append_ledger(task_dir, {
                 "kind": "action_end", "i": i, "status": "skipped",
                 "execution_ok": None, "verified": {"ok": None, "status": "not_checked", "reason": note},
-                "touched_ids": [], "touched_uids": [], "created_ids": [], "cascaded_ids": [], "error": None,
+                "touched_ids": [], "touched_uids": [], "created_ids": recovered_ids or [],
+                "cascaded_ids": [], "error": None,
             })
             done_indices.add(i)
         # decision == "run": fall through, the action below will re-run it
@@ -541,7 +550,14 @@ def register_plan_routes(api):
                     # outcome with design_ok False is a legitimate, disclosed
                     # terminal state -- this does not escalate to "failed";
                     # execution/verification/design stay orthogonal.
-                    criteria_results = evaluators.evaluate_success_criteria(doc, plan)
+                    #
+                    # Phase B slice 2: created_ids_by_action reads the SAME
+                    # ledger records _run_slice just finished appending, so
+                    # a "created_by" criterion can reference an element THIS
+                    # slice's own actions created.
+                    final_ledger_records, _ = task_store.read_ledger(task_dir)
+                    created_by_action = task_store.created_ids_by_action(final_ledger_records)
+                    criteria_results = evaluators.evaluate_success_criteria(doc, plan, created_by_action)
                     for cr in criteria_results:
                         task_store.append_ledger(task_dir, dict(cr, kind="criterion"))
 

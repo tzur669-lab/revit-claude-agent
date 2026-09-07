@@ -169,6 +169,64 @@ def test_find_open_action_flags_more_than_one_as_corrupt(task_dir):
 
 
 # ---------------------------------------------------------------------------
+# created_ids_by_action -- Phase B slice 2's "created_by" resolution source
+# ---------------------------------------------------------------------------
+
+def test_created_ids_by_action_single_id():
+    records = [{"kind": "action_end", "i": 0, "status": "done", "created_ids": [1660300]}]
+    assert ts.created_ids_by_action(records) == {0: [1660300]}
+
+
+def test_created_ids_by_action_multi_id_create_room_separation_shape():
+    records = [{"kind": "action_end", "i": 0, "status": "done", "created_ids": [101, 102, 103]}]
+    assert ts.created_ids_by_action(records) == {0: [101, 102, 103]}
+
+
+def test_created_ids_by_action_skipped_with_recovered_ids_counts():
+    """create_room's probe-recovery fix: a crash-resume skip CAN carry a
+    real recovered id, and it must be treated identically to a normal run."""
+    records = [{"kind": "action_end", "i": 0, "status": "skipped", "created_ids": [1660300]}]
+    assert ts.created_ids_by_action(records) == {0: [1660300]}
+
+
+def test_created_ids_by_action_skipped_without_recovered_ids_is_empty():
+    """The other three creating ops' case: probe always ("unknown", None),
+    so a crash-resume skip contributes nothing -- honest, not a guess."""
+    records = [{"kind": "action_end", "i": 0, "status": "skipped", "created_ids": []}]
+    assert ts.created_ids_by_action(records) == {0: []}
+
+
+def test_created_ids_by_action_excludes_failed_and_unrelated_kinds():
+    records = [
+        {"kind": "action_end", "i": 0, "status": "failed", "created_ids": [999]},
+        {"kind": "action_begin", "i": 1, "created_ids": [888]},  # wrong kind, never counted
+        {"kind": "action_end", "i": 2, "status": "done", "created_ids": [1660300]},
+    ]
+    assert ts.created_ids_by_action(records) == {2: [1660300]}
+
+
+def test_created_ids_by_action_non_creating_action_contributes_empty_list():
+    """move_elements/set_parameters etc. always report created_ids: []
+    (ops.py's own convention) -- present in the map with an empty list,
+    not absent, so a caller can distinguish "this action ran and created
+    nothing" from "this action_i doesn't exist in the ledger at all"."""
+    records = [{"kind": "action_end", "i": 0, "status": "done", "created_ids": []}]
+    assert ts.created_ids_by_action(records) == {0: []}
+
+
+def test_created_ids_by_action_later_record_for_same_i_wins():
+    """Defensive determinism, matching find_open_action's own established
+    last-one-wins rule for 'more than one record for the same i' -- never
+    actually reachable in a non-corrupt ledger (at most one action_end per
+    i), but the rule must still be deterministic if it ever is."""
+    records = [
+        {"kind": "action_end", "i": 0, "status": "done", "created_ids": [111], "seq": 5},
+        {"kind": "action_end", "i": 0, "status": "done", "created_ids": [222], "seq": 9},
+    ]
+    assert ts.created_ids_by_action(records) == {0: [222]}
+
+
+# ---------------------------------------------------------------------------
 # projection fold -- determinism, unknown kinds, verdict rollup
 # ---------------------------------------------------------------------------
 

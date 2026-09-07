@@ -44,6 +44,16 @@ REF_KINDS = frozenset(["element"])  # Phase B, slice 1 found no evidence a room/
 # codebase or model (see docs/architecture.md's Phase B section) -- not
 # built here, disclosed rather than invented.
 
+# success_criteria-only target kinds (Phase B, slice 2). "created_by"
+# refers to an element a plan's OWN action created -- it is deliberately
+# NOT part of REF_KINDS: an action's own `targets` (what it operates ON)
+# stays limited to "element" (an action can't target something that
+# doesn't exist yet at the point plan_exec.py resolves its targets), only
+# a criterion (evaluated after every action has already committed) can
+# meaningfully reference one. Two different validators consult two
+# different frozensets on purpose, not by oversight.
+CRITERION_TARGET_KINDS = REF_KINDS | frozenset(["created_by"])
+
 # success_criteria evaluators (Phase B, slice 1 -- revit_mcp/evaluators.py is
 # the runtime implementation; this is the same data-only CPython twin
 # relationship OPS/ops.py already have). Each entry is the evaluator's own
