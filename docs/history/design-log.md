@@ -1,0 +1,424 @@
+# Design log — how the system got here
+
+Moved verbatim out of `docs/architecture.md` on 2026-11-10 so the architecture doc
+stays short. **Historical / rationale only** — current behaviour is summarised in
+[../architecture.md](../architecture.md); per-tool contracts live in
+[../operation-contracts.md](../operation-contracts.md). Read this only when you need
+*why* a Phase A/B mechanism is shaped the way it is (e.g. before changing
+crash-resume, `created_by`, or evaluator code).
+
+Contents: [Tracker build timeline](#the-trackers-build-timeline) ·
+[Journal format migration](#why-the-journal-moved-from-hebrew-prose-to-english-json) ·
+[Phase A — execution spine](#the-execution-spine-plantask-lifecycle) ·
+[Phase B slice 1](#phase-b-slice-1-success-criteria-become-real) ·
+[slice 2](#phase-b-slice-2-referring-to-what-a-plan-creates) ·
+[slice 3](#phase-b-slice-3-crash-resume-identity-that-never-manufactures-certainty)
+
+---
+
+## The tracker's build timeline
+
+1. **Phase 1** — document identification by canonical path, a full snapshot with
+   geometry and parameter hashes, a diff with lazy parsing, atomic writes.
+2. **Phase 2** — a `DocumentChanged` listener, transaction records, and the
+   attribution engine for the four states.
+3. **Phase 3** — automatic activation through a global `CLAUDE.md` and a
+   `PreToolUse` hook — no need to remember to run it.
+4. **Phase 4** — chunks with resume, a `.lock` file with a numeric epoch (not a
+   time string — `DateTime.Parse` reads a `Z` suffix as local time), a sync
+   window with expiry.
+5. **Later** — a split into two background agents, a journal format migration
+   from Hebrew prose to English `ndjson`, and a global cross-project lessons board.
+
+## Why the journal moved from Hebrew prose to English JSON
+
+Until 2026-08-23 the journal was `PROJECT.md`/`STATE.md` in Hebrew prose. It was
+replaced with `journal.ndjson`/`state.json`, one record per line, in English. The
+reason: the only consumer of the files is Claude, not a human — Hebrew costs 2–3×
+the tokens for the same content, with no reading benefit. The two existing
+instances were frozen to `legacy/`; no information was deleted, and the
+conversion did not touch `tracker.py` at all — the old and new formats sit on top
+of the same `snapshot.tsv`.
+
+---
+
+## The execution spine: plan/task lifecycle
+
+Everything above this section is the command bus this repo started as: 57
+independent tools, each call forgotten the instant it returns. Phase A (built
+2026-09-06) adds the missing primitive — a durable, file-backed **task**
+that survives a client timeout, a paused slice, or Revit itself restarting —
+without touching how any of the 51 pre-existing tools behave.
+
+**The pipeline:** `propose_plan` (validate + hash, no Revit call) →
+`approve_plan` (advisory preflight against the live document, stamps
+identity) → `execute_plan` (one budgeted slice = one `DB.TransactionGroup`)
+→ `get_task_status` (reads disk, never Revit) → `rollback_task` (builds a
+compensation *plan* — never executes anything itself). Full contracts,
+the op table, and the TransactionGroup mechanics measured live before any
+of this was written live in
+[operation-contracts.md](../operation-contracts.md#the-phase-a-execution-spine--propose_plan--approve_plan--execute_plan--get_task_status).
+
+**Where task state actually lives:** `~/.claude/revit-tracker/tasks/<task_id>/`
+— a sibling of the tracker's own `last_run.json`/`audit/`, not a new
+namespace. `ledger.ndjson` (append-only, one writer, fail-stop — an
+unrecordable mutation must never happen) is the single source of truth;
+`progress.json` is a pure, deterministic, disposable fold of it
+(`revit_mcp/task_store.py::fold_progress`) — losing the projection loses
+nothing, since `get_task_status` rebuilds it from the ledger on demand.
+
+**The idempotency fix worth naming on its own:**
+`DB.ElementTransformUtils.MoveElement` is *relative* — applying it twice
+moves twice. `revit_mcp/ops.py`'s `move_elements` op is rewritten *absolute*:
+it captures each target's point before moving, then applies
+`target − current` at run time, so re-running after a crash converges to the
+same place instead of accumulating. The four `create_*`/`place_family` ops
+cannot be made absolute the same way (creating a second element is never a
+no-op), so they classify as `"creating"` and require a `probe()` before ever
+resuming — an inconclusive probe blocks the task for a human rather than
+guessing whether a duplicate would result.
+
+**Six new tools, three genuinely different shapes.** `execute_plan` is the
+only one that mutates the model. `approve_plan` calls one read-only route
+(`/preflight_plan/`) to capture current document identity. `propose_plan`,
+`get_task_status`, and `rollback_task` never call Revit at all — they read
+and write the task's files directly, which is why they are the first tools
+in this project with no matching `@api.route(...)` at all
+(`tests/test_tool_registry.py::_FILESYSTEM_ONLY_TOOLS`, a relaxation that
+test file's own docstring anticipated by name before Phase A existed).
+
+> **gotcha — attribution one layer up from the tracker itself**
+> Measured live, 2026-09-06: moving a wall caused an adjacent room's boundary
+> to shift as a genuine side effect. The tracker's own `attribute()` correctly
+> recorded that room's uid as `"unknown"` (no DocumentChanged event tied to a
+> named transaction covers a derived geometry recompute) — not `"human"`. The
+> first version of `get_task_status`'s unexpected-change classifier
+> (`tools/plan_tools.py::_check_unexpected_changes`) collapsed `"unknown"`
+> into the same bucket as `"human"`/`"sync_incoming"` ("foreign"), which is
+> exactly the mistake `tracker.attribute()` is itself built never to make —
+> "unknown must never be upgraded to human," one layer down. Fixed to treat
+> only positive human/sync evidence as foreign; an uncertain or
+> claude-but-undeclared change now falls to `"unexpected"`, the honest
+> default. `tests/test_unexpected_changes.py` uses the real captured delta
+> from this exact incident as its regression fixture.
+
+**What is deliberately NOT built in Phase A:** the semantic BIM graph
+(rooms→units→floors, adjacency), model health scoring, visual verification,
+and autonomous repair. The plan schema's `scope` and per-action `needs` are
+extension points a later phase plugs into — neither is read by anything in
+Phase A's own executor. `success_criteria.evaluator` **was** on this list;
+Phase B, slice 1 (below) wires it up for real.
+
+### Phase B, slice 1: success criteria become real
+
+Phase A validated `success_criteria` for shape and never ran one —
+`design_ok` (the third leg of the execution/verification/design verdict
+triple) was a hardcoded `None`. Built 2026-09-06, following the same
+audit-first discipline as Phase A: the plan's own first draft was
+adversarially reviewed and revised before implementation over unit
+ambiguity, a misleading distance fallback, and a two-state result that
+would have hidden infrastructure errors behind a legitimate "not checked"
+outcome — see `revit_mcp/evaluators.py`'s and `revit_mcp/eval_support.py`'s
+own module docstrings for the resolved reasoning, not repeated here.
+
+**The 5 v1 evaluators** (`element_exists`, `element_absent`, `room_area_sqm`,
+`param_value`, `distance_mm`), each `(doc, criterion) -> eval_support.
+make_result(...)`, one of **8 named statuses** — `passed | failed |
+invalid_reference | wrong_category | missing_parameter | unsupported_type |
+unsupported_geometry | evaluator_error` — never a bare tri-state that hides
+*why* behind free text. `ok` is derived from `status`, never set
+independently, so the two can never disagree. `element_exists`/
+`element_absent` are thin wrappers over the already-shipped
+`utils.verify_elements_exist`/`editing.verify_delete` (the latter's
+`method` was already the literal string `"element_absent"`); the other
+three are new.
+
+**Unit contract, deliberately not uniform across evaluators, because
+uniformity here would be dishonest:** grepped the whole tree for
+`UnitUtils`/`ForgeTypeId`/`ConvertToInternalUnits` — zero matches anywhere,
+meaning `set_parameters` already has a shipped, live contract that a
+Double parameter's JSON value is Revit's own raw internal unit, no
+conversion. `param_value` makes the identical contract (a value it wrote
+and a criterion that reads it back must agree on units by construction) —
+inventing conversion for `param_value` alone would create a disagreement
+with its own writer, not fix one. `room_area_sqm` (sqm) and `distance_mm`
+(mm) convert on purpose: their unit is part of the evaluator's own *name*,
+not an assumption about a parameter they've never seen. A mismatched
+operator/value-type (`>=` against a String) returns `status:
+"unsupported_type"` rather than raising or silently passing.
+
+**`distance_mm` has no bounding-box-center fallback**, by design: a bbox is
+an axis-aligned artifact with no consistent physical meaning across
+categories (an L-shaped room's own bbox center can sit outside the room).
+Only `DB.LocationPoint`-bearing elements (point-placed families, Rooms) are
+supported; a curve-based element (a wall) returns `"unsupported_geometry"`,
+never an approximated number.
+
+**`design_ok` aggregation** (`eval_support.aggregate_design_ok`, called
+identically from `revit_mcp/task_store.py::fold_progress` and unit-tested
+directly): no criteria evaluated → `None`. Any `"failed"` present → `False`
+— a confirmed violation dominates an unrelated unknown, never softened.
+Else any non-`"passed"` status (including `"evaluator_error"`) → `None`,
+never promoted to `True` by an unrelated criterion passing. Only "every
+criterion passed" → `True`. A `"completed"` task with `design_ok: False` is
+a legitimate, disclosed terminal state — execution/verification/design stay
+orthogonal, exactly as `execution_ok`/`verification_ok` already were.
+Evaluated exactly once per task, in `execute_plan_handler` right after the
+slice reaches `"completed"` and its `TransactionGroup` has already
+`Assimilate()`d — read-only, no transaction
+(`tests/test_evaluators_no_transactions.py` is an AST guard for exactly
+this, the same technique `test_ops_no_transactions.py` already uses).
+
+**Live-verified end-to-end** through the real `plan_exec.py`/`task_store.py`
+functions against the running model: a plan set an existing wall's
+`Comments` parameter, then checked it back (`param_value`, passed), an
+unrelated room's real area against a deliberately-wrong threshold
+(`room_area_sqm`, failed), and both elements' existence (`element_exists`,
+passed) — `design_ok` folded to `False`, correctly dominated by the one
+real failure, with the passing criteria still individually visible. The
+mutation was reverted and confirmed net-zero by the tracker's own diff
+immediately after. One real, IronPython-specific quirk surfaced only by
+this live test, not the offline suite: after `del sys.modules[...]`,
+`from revit_mcp import task_store` can still resolve to a **stale** module
+if the `revit_mcp` package object retains a leftover `task_store` attribute
+from an earlier import — deleting the `sys.modules` entry alone is not
+enough; the parent package's own attribute must be cleared too. Purely a
+verification-script gotcha (the shipped module content was already
+correct), not a product bug — noted here because it will bite the next
+live fresh-reimport test that doesn't know to clear both.
+
+No new ref kinds (`room`/`unit`/`level`/`zone`) — a Room and a Level are
+both ordinary elements already addressable through the one existing
+`"element"` kind; `unit`/`zone` have no existing concept anywhere in this
+codebase or model, so nothing was invented for them.
+
+### Phase B, slice 2: referring to what a plan creates
+
+Slice 1 disclosed one limitation: a criterion could only target an element
+whose id is known at propose time, not one a plan's own action creates —
+the single most natural pairing this whole mechanism exists for
+("create this room, then check its own area") was impossible. Closed
+2026-09-07, after an adversarial review found the first draft accepted two
+real weaknesses without first tracing the actual code:
+
+**`created_by`, a new target kind for `success_criteria` only** (an
+action's own `targets` is untouched — still limited to `"element"`, since
+an action can't target something that doesn't exist yet when
+`plan_exec.py` resolves it): `{"kind": "created_by", "action_i": N, "index":
+0}` — `action_i` names the plan action whose `run()` created the element;
+`index` selects among that action's `created_ids` (schema-validated: the
+referenced action must exist and be an `idempotency: "creating"` op —
+referencing e.g. a `move_elements` action is rejected at propose time, not
+left to fail silently at evaluation time).
+
+**A real recoverability finding, not a speculative fix:** `ops.py`'s
+`_room_probe` — the function that decides whether a `create_room` action
+crash-resumed via probe-skip already applied — computes the real, resolved
+room id via `doc.GetRoomAtPoint` and used to discard it, returning only the
+bare string `"applied"`. It now returns `("applied", [that_id])`, so a
+`created_by` reference to a probe-skipped `create_room` action **can**
+resolve correctly after a crash-resume. The other three creating ops
+(`create_room_separation`, `create_line_based_element`, `place_family`)
+have no membership test at all yet — a pre-existing, disclosed Phase A
+limitation, unsolved here since building one is a separate, larger
+undertaking with no evidence forcing it into this slice; a `created_by`
+reference to one of their probe-skipped actions still resolves to
+`invalid_reference`, honestly.
+
+**Composed references — an additive, backward-compatible schema
+change:** the existing `target` field (a single ref — `"element"` with a
+batch of ids, unchanged, or now also `"created_by"`, a single id) keeps
+working exactly as shipped in slice 1. A new, sibling `targets` field
+(plural — a list of single-source refs, each independently `"element"` or
+`"created_by"`, each resolving to exactly one id) lets `distance_mm`
+compare an existing element against one a plan creates, or two elements
+two different actions create — a single `target` dict cannot express two
+independently-sourced ids. A criterion has exactly one of `target` /
+`targets`. One function, `evaluators.py::_resolve_criterion_targets`,
+resolves both shapes for all 5 evaluators — centralized once rather than
+each evaluator branching on shape itself.
+
+**The result-status vocabulary did not grow.** `design_ok`'s aggregation
+already treats every non-`"passed"`/non-`"failed"` status identically
+(`None`, never promoted), so a `created_by`-specific status
+(`ambiguous_output`, `unrecoverable_output`, …) would change no aggregation
+behaviour — only prose. `invalid_reference`'s `reason` string carries the
+specific detail instead ("action 2 produced no output — …" vs. "index 1
+out of range: action 2 produced 1 output(s)" vs. "action_i 3 is not a
+'creating' op").
+
+**A real correction the live test forced, worth recording precisely:**
+the plan's own first draft assumed `create_room_separation` could produce
+more than one output in a single action (`rooms.apply_create_room_separation`
+does accept a multi-curve array in general). Measured: `ops.py`'s own
+`_room_sep_run` — the specific wiring the plan/task system calls — only
+ever builds a **one**-curve array from its single `curve_mm` arg, so
+`created_ids` is always exactly one id through this path today, same as
+the other three creating ops. `index` stays in the schema (harmless,
+forward-compatible if a future op ever produces more than one output) but
+is unexercised beyond `0` by any op that exists today — documented as
+measured, not assumed, per this project's own rule.
+
+**Live-verified end-to-end**, the realistic multi-action shape this slice
+exists for: a plan created 4 temporary walls (actions 0–3, a small
+enclosure far outside the real building) then a room inside them (action 4,
+declared `needs: [0,1,2,3]`) — `room_area_sqm` on `created_by(action_i=4)`
+read the room's real, positive area (13.33 sqm) against both a passing and
+a failing threshold; `element_exists` on `created_by(action_i=0)` (a wall)
+passed; a composed `distance_mm` (`targets`: an existing real family
+instance + `created_by(action_i=4)`) measured a real 428 m and passed.
+`design_ok` folded to `False`, correctly dominated by the one failing
+threshold. `_room_probe`'s recovered id was directly confirmed to match the
+real created room's id. All 5 elements were deleted afterward and the
+tracker's own checkpoint diff confirmed net-zero.
+
+### Phase B, slice 3: crash-resume identity that never manufactures certainty
+
+Slice 2 left one disclosed gap open: `create_room_separation`,
+`create_line_based_element`, and `place_family` had no membership test at
+all — their probes were unconditionally `("unknown", None)`, so a crash in
+any of their transaction windows always blocked the task for manual review,
+and a `created_by` reference to one of them stayed `invalid_reference`
+forever. Closed 2026-09-07 through **two** full adversarial-review cycles —
+the first draft (type+geometry candidate matching) was rejected for
+inferring causal identity from a resemblance test; the second draft
+(universe-diff) was rejected again for treating `not_applied` as a default
+rather than a conclusion, and for "last one wins" tie-breaking on identity
+evidence. The design that shipped is the third revision.
+
+**A 4-level evidence hierarchy, made real, not just documented:**
+
+1. **Authoritative** — a single, non-conflicting `commit_result` ledger
+   record.
+2. **Any other deterministic signal** — audited, found not to exist:
+   every ledger record an open action can leave (`action_begin`, bare
+   `stage` markers) carries no `result`; `created_ids` is written exactly
+   once, in `action_end`, which by definition doesn't exist for an open
+   action.
+3. **Universe-diff heuristic**, bounded — described below.
+4. **`unknown` with a reason** — never a guessed id.
+
+**Level 1 — `commit_result`, a new ledger record.** `plan_exec.py`'s slice
+loop, immediately after `commit_verified()` reports a **creating** op's
+transaction `Committed` (absolute ops need no identity recovery and get no
+record), appends `{"kind": "commit_result", "i", "op", "created_ids",
+"touched_ids"}` — authoritative because it is written only once Revit
+itself confirms the commit, using the real `result` already in memory at
+that point. This is **not** an atomic pairing with Revit's own commit: a
+crash between `commit_verified()` returning and this append is exactly the
+residual window Level 3 still exists for. `_classify_open_action` checks
+this record **before** any probe call; when present, the op's own probe is
+never invoked at all (live-confirmed by monkey-patching a probe to raise
+and observing it never fires). On the authoritative path only, the skip
+also runs the op's real `verify()` against a synthetic
+`{"created_ids", "touched_ids"}` result, instead of recording a permanent
+`not_checked` — identity is certain there, so re-checking the element's own
+post-conditions adds real information; a heuristic recovery keeps the
+plain `not_checked` it always had, since re-verifying the least-certain
+part of the picture would only manufacture the appearance of confidence.
+
+**Ledger integrity is fail-closed, never "last one wins."**
+`task_store.commit_result_evidence(records, i)`: no record → fall through
+to the probe; one record (or several identical ones) → authoritative;
+several **disagreeing** records (different `op`/`created_ids`/`touched_ids`)
+→ `("conflict", None, "commit_result_conflict")`, and `_classify_open_action`
+**blocks** rather than picking one arbitrarily — a duplicated or corrupted
+ledger must never silently change which element a recovery believes was
+created. Separately, `task_store.ledger_conflicts(records)` cross-checks
+every `commit_result` against that same action's eventual `action_end` and
+surfaces a disagreement (agreement, the overwhelmingly common case, is not
+reported) through a new `ledger_conflicts` field on `fold_progress`'s
+existing anomaly channel, next to `unknown_ledger_kinds` — visible, never
+silently repaired, flowing to `get_task_status` through the response
+builder with no tool-schema change.
+
+**Level 3 — universe-diff, not candidate-diff.** The first-rejected design
+diffed only elements *matching the request*; that cannot tell a newly
+**created** element from a pre-existing one **independently modified** into
+matching, since an element that didn't match at capture time was never in
+the "before" picture at all — live-reproduced and fixed (below). The
+shipped design captures the **whole type-scoped universe** — every element
+of the relevant category+type, matching or not, as `{str(id):
+quantized_fingerprint}` — and requires the *entire* survivor set to be
+byte-identical before even considering "no new ids" a conclusion:
+
+```
+before_map is None                                    -> unknown, "no_capture"
+any id in before_map missing from current, or changed  -> unknown, "relevant_model_change_ambiguous"
+(only once the universe is otherwise UNCHANGED do we look at what's new)
+no new ids                                            -> not_applied, "no_relevant_change"
+exactly one new id, in matching_ids                    -> applied, [that id], "single_new_match"
+exactly one new id, not matching                       -> unknown, "new_elements_none_matching"
+more than one new id                                  -> unknown, "multiple_new_candidates"
+```
+
+`applied` and a recovered id are established by the same single fact and
+are never returned apart. This lives in `eval_support.py`
+(`probe_outcome_from_universe`, plus `endpoints_match`/`point_match`) —
+Revit-free and exhaustively unit-tested, respecting this repo's own rule
+that `FilteredElementCollector` is never faked offline
+(`conftest_revit_mcp.py`): the pure comparison is tested for real; the
+Revit-side collection is tested live.
+
+**Per-op identity uses only operation-controlled inputs, not "whatever
+Revit exposes":**
+
+| Op | Universe (narrowest collector) | Matched on | Deliberately excluded |
+|---|---|---|---|
+| `create_line_based_element` | `OST_Walls`, `GetTypeId() == type_id` | curve endpoints (bidirectional, `_CURVE_TOLERANCE_MM`), base-level (resolved by the **same** helper `_line_elem_run` uses), height (`WALL_USER_HEIGHT_PARAM`) | offset/`is_structural` — `_line_elem_run` hardcodes both, zero discrimination |
+| `create_room_separation` | `OST_RoomSeparationLines` | curve endpoints only | level/view — the line's elevation **is** `curve_mm`'s own z; adds no discrimination beyond the endpoint match, audited not overlooked |
+| `place_family` | `FamilyInstance`, `Symbol.Id == symbol_id` | point (`placement.PLACEMENT_TOLERANCE_FT`, z-only when hosted — the same rule `verify_place_family` already uses), host id when supplied, level id when supplied **and** reliably readable | rotation/facing/placement type — `_place_run` never sets them, Revit picks a default |
+| `create_room` | `OST_Rooms` | `GetRoomAtPoint` ∩ newly-appeared ids | — (this is the fix below) |
+
+**The `_room_probe` false-`applied` bug, found by applying the review's own
+scenario list to already-shipped code, not by testing it:** the original
+probe compared only `GetRoomAtPoint`'s result before vs. after. It cannot
+tell "a new room was created here" from "a **pre-existing** room started
+reaching this point because its boundary grew elsewhere during the crash
+window" — the second case reported `("applied", [that pre-existing room's
+id])`, handing a wrong id to any `created_by` reference. **Live-reproduced
+exactly**: built a 2×2 m room, captured a point outside it, then extended
+the enclosing walls (keeping the loop closed) until `GetRoomAtPoint` for
+that outside point started returning the *same* pre-existing room —
+confirmed the fixed probe answers `unknown` / `relevant_model_change_ambiguous`,
+while the old single-id comparison would have answered `applied`, with the
+real IDs printed side by side.
+
+**The room-separation curve-access question, measured, not guessed:**
+`.Location.Curve` on a real `NewRoomBoundaryLines`-created `ModelLine`
+returns a real `DB.Line` directly — the walls-style access works, so the
+`.GeometryCurve` fallback ships but is unexercised in this Revit version.
+
+**Live-verified, not just fresh-reimport in isolation**, for every one of
+the four creating ops: `not_applied` (nothing created), `applied` with the
+exact real id (heuristic path), ambiguous (two new matching →
+`unknown`/`multiple_new_candidates`, no id), a **pre-existing duplicate**
+already in the universe correctly excluded when a genuinely new match
+appears alongside it, and probe determinism (two calls, identical result).
+Plus the full pipeline end-to-end: a real `_run_slice` call on a genuine
+one-action plan produced the ledger sequence
+`action_begin → stage(committing) → commit_result → stage(verifying) →
+action_end`, with `commit_result.created_ids` and `action_end.created_ids`
+agreeing exactly; a synthetic crash-window ledger (a `commit_result` with
+no following `action_end`) resolved through `_classify_open_action` via
+Level 1 with the op's probe monkey-patched to raise and never firing; two
+disagreeing `commit_result` records for the same action correctly
+`block`ed rather than picking one. Collector cost measured against the
+real model (61 walls, 327 family instances, ~700 elements total): each
+universe scan completed in single-digit-to-low-teens milliseconds, negligible
+against the 20-second slice budget. Every element created during
+verification was deleted afterward; the tracker's own checkpoint diff
+confirmed net-zero.
+
+**Residual risk, documented rather than designed away:** `resume=true`
+deliberately bypasses the `revit_restarted` block, so recovery runs
+precisely when a human may have edited the model in between crash and
+resume. Someone creating an indistinguishable element, with no other
+change in that same type-scoped universe, would satisfy the heuristic —
+this is not provable causation, only a bounded heuristic, and is never
+described as more than that. Document locking against concurrent edits
+during the recovery window stays out of scope.
+
+**Still open, disclosed not solved:** action-to-action targeting (an
+action's own `targets` referencing a prior action's output, not just a
+criterion's) — a separate, larger feature, no evidence forcing it yet.

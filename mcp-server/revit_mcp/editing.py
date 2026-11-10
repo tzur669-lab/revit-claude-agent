@@ -1,0 +1,430 @@
+# -*- coding: UTF-8 -*-
+"""
+Editing Module for Revit MCP
+Handles element deletion, modification, and selection retrieval
+"""
+
+from utils import get_element_name, make_element_id, get_element_id_value, suppress_warnings, repair_hebrew_in, commit_verified, param_read_matches, resolve_param, read_param_typed, set_param_typed
+from pyrevit import routes, revit, DB
+import json
+import traceback
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# delete_elements core -- transaction-agnostic, extracted from the route
+# below with no behaviour change, shared with revit_mcp/ops.py's dispatcher.
+# ---------------------------------------------------------------------------
+
+def apply_delete(doc, elements_to_delete):
+    """doc.Delete per id -> (deleted_ids, cascaded_ids), both plain ints.
+    cascaded_ids is already deduped against the primary ids -- doc.Delete's
+    own return value is Revit's authoritative cascade answer, not a
+    re-derived guess. Assumes an open, caller-owned transaction; never
+    commits, never rolls back."""
+    deleted_ids = []
+    cascaded_ids = []
+    for elem_id in elements_to_delete:
+        result = doc.Delete(elem_id)
+        primary_id = get_element_id_value(elem_id)
+        deleted_ids.append(primary_id)
+        if result:
+            for del_id in result:
+                del_id_int = get_element_id_value(del_id)
+                if del_id_int != primary_id and del_id_int not in cascaded_ids:
+                    cascaded_ids.append(del_id_int)
+    cascaded_ids = [cid for cid in cascaded_ids if cid not in deleted_ids]
+    return deleted_ids, cascaded_ids
+
+
+def verify_delete(doc, elements_to_delete):
+    """Level-2 post-condition: each ORIGINALLY-requested element must no
+    longer resolve. Cascaded deletions are a bonus/side effect, not part
+    of this operation's own contract -- unchanged from the route's
+    original inline check."""
+    still_exists = [get_element_id_value(eid) for eid in elements_to_delete
+                     if doc.GetElement(eid) is not None]
+    verified = {
+        "ok": len(still_exists) == 0,
+        "method": "element_absent",
+        "expected": {"count": len(elements_to_delete)},
+        "actual": {"count_deleted": len(elements_to_delete) - len(still_exists)},
+    }
+    if still_exists:
+        verified["failures"] = [{"id": i} for i in still_exists[:50]]
+    return verified
+
+
+def register_editing_routes(api):
+    """Register all editing routes with the API"""
+
+    @api.route("/delete_elements/", methods=["POST"])
+    def delete_elements_handler(doc, request):
+        """Delete one or more elements from the Revit model."""
+        try:
+            if not doc:
+                return routes.make_response(
+                    data={"error": "No active Revit document"}, status=503
+                )
+
+            # Parse request data
+            if not request or not request.data:
+                return routes.make_response(
+                    data={"error": "No data provided"}, status=400
+                )
+
+            data = json.loads(request.data) if isinstance(request.data, str) else request.data
+            data = repair_hebrew_in(data)
+
+            element_ids = data.get("element_ids", [])
+            if not element_ids:
+                return routes.make_response(
+                    data={"error": "No element_ids provided"}, status=400
+                )
+
+            # Validate all elements exist before deleting
+            elements_to_delete = []
+            for eid in element_ids:
+                elem_id = make_element_id(eid)
+                elem = doc.GetElement(elem_id)
+                if not elem:
+                    return routes.make_response(
+                        data={"error": "Element {} not found in the active model".format(eid)},
+                        status=404,
+                    )
+                elements_to_delete.append(elem_id)
+
+            # Delete in a single transaction
+            t = DB.Transaction(doc, "Delete Elements via MCP")
+            t.Start()
+            suppress_warnings(t)
+
+            try:
+                deleted_ids, cascaded_ids = apply_delete(doc, elements_to_delete)
+
+                tx_ok, tx_status = commit_verified(t)
+                if tx_ok is False:
+                    return routes.make_response(
+                        data={
+                            "status": "error",
+                            "tx_status": tx_status,
+                            "tx_ok": tx_ok,
+                            "error": "Transaction did not commit (tx_status={}) - no elements were deleted.".format(tx_status),
+                        },
+                        status=500,
+                    )
+
+                # Level 2: each originally-requested element must no longer
+                # resolve. Cascaded deletions are a bonus/side effect, not
+                # part of this operation's own contract.
+                verified = verify_delete(doc, elements_to_delete)
+
+                message = "Deleted {} element{}".format(
+                    len(deleted_ids),
+                    "s" if len(deleted_ids) != 1 else ""
+                )
+                if cascaded_ids:
+                    message += " ({} hosted element{} also removed)".format(
+                        len(cascaded_ids),
+                        "s" if len(cascaded_ids) != 1 else ""
+                    )
+
+                return routes.make_response(
+                    data={
+                        "status": "success",
+                        "deleted_count": len(deleted_ids),
+                        "deleted_ids": deleted_ids,
+                        "cascaded_ids": cascaded_ids,
+                        "tx_status": tx_status,
+                        "tx_ok": tx_ok,
+                        "verified": verified,
+                        "message": message,
+                    }
+                )
+
+            except Exception as tx_error:
+                if t.HasStarted() and not t.HasEnded():
+                    t.RollBack()
+                raise tx_error
+
+        except Exception as e:
+            logger.error("Failed to delete elements: {}".format(str(e)))
+            error_trace = traceback.format_exc()
+            return routes.make_response(
+                data={"error": str(e), "traceback": error_trace}, status=500
+            )
+
+    @api.route("/modify_element/", methods=["POST"])
+    def modify_element_handler(doc, request):
+        """Modify parameter values on a Revit element."""
+        try:
+            if not doc:
+                return routes.make_response(
+                    data={"error": "No active Revit document"}, status=503
+                )
+
+            if not request or not request.data:
+                return routes.make_response(
+                    data={"error": "No data provided"}, status=400
+                )
+
+            data = json.loads(request.data) if isinstance(request.data, str) else request.data
+            data = repair_hebrew_in(data)
+
+            element_id = data.get("element_id")
+            parameters = data.get("parameters", {})
+
+            if element_id is None:
+                return routes.make_response(
+                    data={"error": "No element_id provided"}, status=400
+                )
+
+            if not parameters:
+                return routes.make_response(
+                    data={"error": "No parameters provided"}, status=400
+                )
+
+            # Find the element
+            elem_id = make_element_id(element_id)
+            elem = doc.GetElement(elem_id)
+            if not elem:
+                return routes.make_response(
+                    data={"error": "Element {} not found in the active model".format(element_id)},
+                    status=404,
+                )
+
+            # Start transaction
+            t = DB.Transaction(doc, "Modify Element via MCP")
+            t.Start()
+            suppress_warnings(t)
+
+            try:
+                changes = []
+                failed = []
+                to_verify = []  # (param_name, storage_type, intended) - set() didn't raise
+
+                for param_name, new_value in parameters.items():
+                    # allow_type_fallback=False: modify_element, unlike
+                    # set_parameter, deliberately never falls back to the
+                    # element's type parameter -- preserved exactly.
+                    param, _owner = resolve_param(doc, elem, param_name, allow_type_fallback=False)
+                    if not param:
+                        # List available parameters for better error messages
+                        available = []
+                        for p in elem.Parameters:
+                            try:
+                                available.append(p.Definition.Name)
+                            except Exception:
+                                continue
+                        available.sort()
+                        failed.append({
+                            "parameter": param_name,
+                            "reason": "not found",
+                            "available_parameters": available[:20],
+                        })
+                        continue
+
+                    if param.IsReadOnly:
+                        failed.append({
+                            "parameter": param_name,
+                            "reason": "read-only",
+                        })
+                        continue
+
+                    _storage_type, old_value = read_param_typed(param)
+
+                    try:
+                        set_param_typed(param, new_value)
+                    except ValueError as type_err:
+                        # set_param_typed raises exactly this message for a
+                        # storage type none of the four branches handle --
+                        # preserve the original's distinct "unsupported
+                        # storage type" reason (no "set failed:" prefix).
+                        if str(type_err) == "unsupported storage type":
+                            failed.append({
+                                "parameter": param_name,
+                                "reason": "unsupported storage type",
+                            })
+                        else:
+                            failed.append({
+                                "parameter": param_name,
+                                "reason": "set failed: {}".format(str(type_err)),
+                            })
+                        continue
+                    except Exception as set_err:
+                        failed.append({
+                            "parameter": param_name,
+                            "reason": "set failed: {}".format(str(set_err)),
+                        })
+                        continue
+
+                    changes.append({
+                        "parameter": param_name,
+                        "old_value": old_value,
+                        "new_value": str(new_value),
+                        "status": "set",
+                    })
+                    to_verify.append((param_name, param.StorageType, new_value))
+
+                tx_ok, tx_status = commit_verified(t)
+                if tx_ok is False:
+                    return routes.make_response(
+                        data={
+                            "status": "error",
+                            "element_id": element_id,
+                            "tx_status": tx_status,
+                            "tx_ok": tx_ok,
+                            "error": "Transaction did not commit (tx_status={}) - no parameters were changed.".format(tx_status),
+                        },
+                        status=500,
+                    )
+
+                # Level 2: re-read each parameter that Set() didn't raise on,
+                # AFTER commit - Set() not raising is not proof the value
+                # actually holds once Revit's regeneration finishes running.
+                elem_after = doc.GetElement(elem_id)
+                verify_failures = []
+                for param_name, storage_type, intended in to_verify:
+                    p = elem_after.LookupParameter(param_name)
+                    if p is None:
+                        verify_failures.append({"parameter": param_name, "reason": "not found on re-read"})
+                        continue
+                    ok, actual_str = param_read_matches(p, storage_type, intended)
+                    if not ok:
+                        verify_failures.append({
+                            "parameter": param_name,
+                            "expected": str(intended),
+                            "actual": actual_str,
+                        })
+                verified = {
+                    "ok": (len(verify_failures) == 0) if to_verify else None,
+                    "method": "param_read_back",
+                    "expected": {"count": len(to_verify)},
+                    "actual": {"count_ok": len(to_verify) - len(verify_failures)},
+                }
+                if not to_verify:
+                    verified["status"] = "not_checked"
+                    verified["reason"] = "No parameter was successfully set (see failed)"
+                if verify_failures:
+                    verified["failures"] = verify_failures[:50]
+
+                message = "Modified {} parameter{} on element {}".format(
+                    len(changes),
+                    "s" if len(changes) != 1 else "",
+                    element_id,
+                )
+
+                return routes.make_response(
+                    data={
+                        "status": "success",
+                        "element_id": element_id,
+                        "changes": changes,
+                        "failed": failed,
+                        "tx_status": tx_status,
+                        "tx_ok": tx_ok,
+                        "verified": verified,
+                        "message": message,
+                    }
+                )
+
+            except Exception as tx_error:
+                if t.HasStarted() and not t.HasEnded():
+                    t.RollBack()
+                raise tx_error
+
+        except Exception as e:
+            logger.error("Failed to modify element: {}".format(str(e)))
+            error_trace = traceback.format_exc()
+            return routes.make_response(
+                data={"error": str(e), "traceback": error_trace}, status=500
+            )
+
+    @api.route("/selected_elements/", methods=["GET"])
+    def get_selected_elements_handler(doc, uidoc):
+        """Get details of elements currently selected in Revit UI."""
+        try:
+            if not doc:
+                return routes.make_response(
+                    data={"error": "No active Revit document"}, status=503
+                )
+
+            if not uidoc:
+                return routes.make_response(
+                    data={"error": "No active UI document"}, status=503
+                )
+
+            # Get current selection
+            selection = uidoc.Selection.GetElementIds()
+
+            elements = []
+            for elem_id in selection:
+                elem = doc.GetElement(elem_id)
+                if not elem:
+                    continue
+
+                elem_info = {
+                    "id": get_element_id_value(elem_id),
+                    "category": elem.Category.Name if elem.Category else "Unknown",
+                    "type": get_element_name(elem),
+                }
+
+                # Try to get level
+                try:
+                    level_id = elem.LevelId
+                    if level_id and level_id != DB.ElementId.InvalidElementId:
+                        level = doc.GetElement(level_id)
+                        if level:
+                            elem_info["level"] = get_element_name(level)
+                except Exception:
+                    pass
+
+                # Get key parameters
+                params = {}
+                key_param_names = ["Mark", "Comments", "Length", "Area", "Volume", "Width", "Height"]
+                for pname in key_param_names:
+                    try:
+                        p = elem.LookupParameter(pname)
+                        if p and p.HasValue:
+                            if p.StorageType == DB.StorageType.String:
+                                val = p.AsString()
+                                if val:
+                                    params[pname] = val
+                            elif p.StorageType == DB.StorageType.Double:
+                                params[pname] = str(round(p.AsDouble(), 4))
+                            elif p.StorageType == DB.StorageType.Integer:
+                                params[pname] = str(p.AsInteger())
+                    except Exception:
+                        continue
+
+                if params:
+                    elem_info["parameters"] = params
+
+                elements.append(elem_info)
+
+            count = len(elements)
+            if count == 0:
+                message = "No elements currently selected"
+            elif count == 1:
+                message = "1 element currently selected"
+            else:
+                message = "{} elements currently selected".format(count)
+
+            return routes.make_response(
+                data={
+                    "status": "success",
+                    "elements": elements,
+                    "count": count,
+                    "message": message,
+                }
+            )
+
+        except Exception as e:
+            logger.error("Failed to get selected elements: {}".format(str(e)))
+            error_trace = traceback.format_exc()
+            return routes.make_response(
+                data={"error": str(e), "traceback": error_trace}, status=500
+            )
+
+    logger.info("Editing routes registered successfully")

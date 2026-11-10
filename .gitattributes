@@ -1,0 +1,12 @@
+# Normalize line endings. Repo stores LF; checkout is native.
+* text=auto
+
+*.py   text eol=lf
+*.md   text eol=lf
+*.json text eol=lf
+*.jsonc text eol=lf
+*.toml text eol=lf
+*.lock text eol=lf
+*.ps1  text eol=crlf
+
+*.png  binary

@@ -1,0 +1,18 @@
+{
+  "//": "Merge this 'hooks' block into your Claude Code USER settings at ~/.claude/settings.json. It fires hook_session_reminder.py once per session, before the first Revit MCP call. Replace <YOU> with your Windows username (use a full absolute path — hook commands are not tilde-expanded). Adjust if you did not install the tracker to the default ~/.claude/revit-tracker.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "mcp__revit__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"C:/Users/<YOU>/.claude/revit-tracker/hook_session_reminder.py\"",
+            "timeout": 10,
+            "statusMessage": "Revit tracking check"
+          }
+        ]
+      }
+    ]
+  }
+}
